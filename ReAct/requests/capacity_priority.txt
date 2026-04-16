@@ -1,0 +1,2 @@
+Capacity is the top priority. Target average capacity >= 3.0 in ROI while keeping coverage >= 90%.
+Site count <= 8. Prefer actions that increase capacity even if coverage gains are small.

@@ -1,0 +1,31 @@
+env:
+  map_size: 256
+  action_space_size: 32
+  no_masking: false
+  non_building_pixel: 1.0
+  roi_is_black: true
+  roi_threshold: 0.01
+  tx_power_dbm: 23.0
+  pathloss_threshold_db: 140.0
+  coverage_threshold_db: -117.0
+  coverage_target: 0.9
+  spectral_efficiency_target: 3.5
+  w1: 1.0
+  w2: 1.0
+  noise_coefficient_db: 10.0
+  pathgain_db_min: -162.0
+  pathgain_db_max: -75.0
+  channel_bandwidth_hz: 20000000.0
+  crop_size: 256
+  stride: 128
+  dataset_limit: 512
+  dataset_offset: 0
+  dataset_stride: 1
+
+train:
+  gamma: 0.99
+  train_batch_size: 1000
+  sgd_minibatch_size: 128
+  model:
+    fcnet_hiddens: [128, 128, 128, 128]
+    fcnet_activation: relu

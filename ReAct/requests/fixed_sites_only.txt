@@ -1,0 +1,2 @@
+Deploy exactly the required number of sites under the fixed-site constraint.
+Stop when the exact site count is reached; prioritize maximizing final coverage, with capacity as secondary.

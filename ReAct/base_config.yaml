@@ -1,0 +1,43 @@
+env:
+  map_size: 256
+  action_space_size: 32
+  roi_is_black: true
+  roi_threshold: 0.01
+  tx_is_black: true
+  tx_threshold: 0.01
+  coverage_threshold_db: -117.0
+  noise_coefficient_db: 10.0
+
+surrogate_models:
+  pmnet:
+    model_py_path: ../surrogate/model_pmnet.py
+    weights_path: ../surrogate/checkpoints/pmnet_radiomap3dseer.pt
+    builder_name: build_pmnet
+  rmnet:
+    model_py_path: ../surrogate/model_rmnet.py
+    weights_path: ../surrogate/checkpoints/rmnet_radiomap3dseer.pt
+    builder_name: build_rmnet
+
+ppo:
+  checkpoint_path: checkpoints
+  version: single
+  init_k: 1
+
+llamafactory:
+  root: ""
+  model: ""
+  adapter: ""
+  template: qwen
+  backend: huggingface
+  dtype: auto
+
+qwen:
+  model_path: Qwen/Qwen2.5-7B
+  device: auto
+  dtype: auto
+  max_new_tokens: 320
+
+paths:
+  prompt_path: prompts/radiomap.json
+  traj_dir: outputs/trajs
+  log_dir: outputs/logs

@@ -1,0 +1,2 @@
+Strict site limit: use no more than 6 sites. Target coverage >= 84% in ROI.
+If coverage cannot reach target, prefer tuning or moving existing sites.

@@ -1,0 +1,2 @@
+Target coverage >= 92% and average capacity >= 2.5 in ROI.
+Budget is limited, keep site count <= 6 and avoid unnecessary add_site steps.

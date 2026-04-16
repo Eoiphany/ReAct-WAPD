@@ -1,0 +1,2 @@
+Cost is the top priority. Keep site count <= 5 and avoid adding new sites unless coverage < 85%.
+Target coverage >= 88% if possible within the cost limits.

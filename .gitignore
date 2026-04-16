@@ -1,6 +1,7 @@
 .idea/
 .omx/
 .vscode/
+.DS_Store
 
 /Autobs/__pycache__/
 /Autobs/.cache/
@@ -8,8 +9,10 @@
 /Autobs/checkpoints/
 /Autobs/env/__pycache__/
 /Autobs/env/__init__.py
-/Autobs/models/__pycache__/
+/Autobs/models/PMNet.pt
+/Autobs/models/RMNet.pt
 /Autobs/models/__init__.py
+/Autobs/models/__pycache__/
 /Autobs/outputs/
 /Autobs/rl_module/__pycache__/
 /Autobs/rl_module/__init__.py

@@ -1,0 +1,2 @@
+Target coverage >= 90% in the ROI while using no more than 6 sites.
+Prefer actions that increase coverage quickly. Cost is secondary.

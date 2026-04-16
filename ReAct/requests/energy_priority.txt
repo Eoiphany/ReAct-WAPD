@@ -1,0 +1,2 @@
+Prioritize energy efficiency. Minimize total transmit power while keeping coverage >= 90% in ROI.
+Site count should be <= 6. Avoid unnecessary add_site if tuning can help.
