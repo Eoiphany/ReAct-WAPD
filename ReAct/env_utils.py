@@ -48,12 +48,12 @@ coverage_threshold_db = float(
     ENV_CFG.get("coverage_threshold_db", TX_POWER_DBM - PATHLOSS_THRESHOLD_DB)
 )
 
-
+# 01 -> dB
 def normalized_pathgain_to_db(pathgain_map: np.ndarray) -> np.ndarray:
     clipped = np.clip(np.asarray(pathgain_map, dtype=np.float32), 0.0, 1.0)
     return clipped * (HEURISTIC_DB_MAX - HEURISTIC_DB_MIN) + HEURISTIC_DB_MIN
 
-
+# dB -> 01
 def db_pathgain_to_normalized(pathgain_db: np.ndarray) -> np.ndarray:
     clipped = np.clip(np.asarray(pathgain_db, dtype=np.float32), HEURISTIC_DB_MIN, HEURISTIC_DB_MAX)
     return (clipped - HEURISTIC_DB_MIN) / (HEURISTIC_DB_MAX - HEURISTIC_DB_MIN)
@@ -103,13 +103,14 @@ def _roi_mask(pixel_map: np.ndarray) -> np.ndarray:
         return pixel_map <= roi_threshold
     return pixel_map >= roi_threshold
 
-# 得到的是RoI区域
+# 得到的是RoI区域 传入的是buildingsWHeight地图
 def _tx_mask(pixel_map: np.ndarray) -> np.ndarray:
     # config: tx_is_black = roi_is_black
-    #   roi_is_black: true
+    #   roi_is_black: false
     #   roi_threshold: 0.01
     if tx_is_black:
         return pixel_map <= tx_threshold
+    # 一定返回地图非黑的建筑物灰度位置
     return pixel_map >= tx_threshold
 
 
@@ -137,7 +138,7 @@ def normalize_redundancy_target(value) -> dict[str, float]:
 
 # pixel_map是二维的
 def calc_action_mask(pixel_map: np.ndarray) -> np.ndarray:
-    #  upsampling_factor = map_size // action_space_size
+    # upsampling_factor = map_size // action_space_size
     # 采样upsampling_factor的中心位置作为动作点
     idx = np.arange((upsampling_factor - 1) // 2, map_size, upsampling_factor)
     # 找到当前pixel_map中tx所在RoI区域采样块内的所有中心位置行，再从选出的这些行_tx_mask(pixel_map)[idx]中选择中心位置列
@@ -171,8 +172,21 @@ def calc_coverage(city_map: np.ndarray, strongest_pathgain_db: np.ndarray) -> fl
 
 
 def calc_capacity(city_map: np.ndarray, strongest_pathgain_db: np.ndarray, total_rx_power_mw: np.ndarray) -> float:
+    """
+
+    Parameters
+    ----------
+    city_map
+    strongest_pathgain_db:max(pathloss,...)
+    total_rx_power_mw:sum(pathloss,...)
+
+    Returns
+    -------
+
+    """
     roi_mask = _roi_mask(city_map)
     strongest_roi_db = np.asarray(strongest_pathgain_db, dtype=np.float64)[roi_mask]
+    # 某个位置接收到的“所有信号功率之和”，包含最强基站信号（有用信号）和其他基站信号（干扰）
     total_roi_mw = np.asarray(total_rx_power_mw, dtype=np.float64)[roi_mask]
     if strongest_roi_db.size == 0:
         return 0.0
@@ -192,25 +206,37 @@ def calc_redundancy_rate(city_map: np.ndarray, site_pathgain_db: np.ndarray) -> 
         return 0.0
 
     rx_power_dbm = TX_POWER_DBM + np.asarray(site_pathgain_db, dtype=np.float64)
+    # 沿着站点通道维度统计非零的数量，原始返回的是布尔值
     covered_counts = np.count_nonzero(rx_power_dbm >= coverage_threshold_db, axis=0)
     roi_covered_counts = covered_counts[roi_mask]
     if roi_covered_counts.size == 0:
         return 0.0
 
     covered_pixels = roi_covered_counts >= int(redundancy_count_thresholds[0])
+    # 统计大于redundancy_count_thresholds[0]的数量 bool -> int，np.count_nonzero返回标量
     covered_pixel_count = int(np.count_nonzero(covered_pixels))
     if covered_pixel_count == 0:
         return 0.0
 
     redundant_pixels = roi_covered_counts >= int(redundancy_count_thresholds[1])
     redundant_pixel_count = int(np.count_nonzero(redundant_pixels))
+    # 衡量的是如果1个就能有这么大的覆盖率，你要用2个还是这么多就有些冗余了
+    # 比值一定小于等于1
     return float(redundant_pixel_count / covered_pixel_count)
 
 
 def redundancy_balance_score(value: float, target=None) -> float:
+    # default_target_cfg = {"ideal": 0.45, "tolerance": 0.15}
     target_cfg = normalize_redundancy_target(target)
     deviation = abs(float(value) - float(target_cfg["ideal"]))
     tolerance = float(target_cfg["tolerance"])
+    #         1
+    #         ▲
+    #        / \
+    #       /   \
+    #      /     \
+    #     0-------0
+    #  ideal±tolerance
     return max(0.0, 1.0 - deviation / tolerance)
 
 
@@ -245,3 +271,4 @@ if  __name__ == "__main__":
     city_map_path = "/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/0.png"
     pixel_map = load_map_normalized(city_map_path)
     candidates = calc_action_mask(pixel_map)
+    print(candidates.shape)

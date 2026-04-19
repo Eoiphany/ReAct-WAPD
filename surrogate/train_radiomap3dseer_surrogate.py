@@ -1,7 +1,7 @@
 """
 用途:
-  在 RadioMap3DSeer 数据集上从零训练 PMNet 或 RMNet，并输出验证/测试指标。
-  在 RadioMap3DSeer 数据集上从零开始训练 PMNet 或 RMNet 模型，完成训练、验证、测试，并将配置、划分结果、训练历史、最优权重与最终指标保存到输出目录中
+  在 RadioMap3DSeer 数据集上训练或评估代理模型，完成训练、验证、测试，并将配置、划分结果、
+  训练历史、最优权重与最终指标保存到输出目录中。
 
 示例命令:
   训练 PMNet:
@@ -9,16 +9,45 @@
       --model-type pmnet \
       --data-root /path/to/RadioMap3DSeer \
       --output-root surrogate/runs
+
+    python autodl-tmp/surrogate/train_radiomap3dseer_surrogate.py \
+      --model-type pmnet \
+      --data-root autodl-tmp/dataset/ \
+      --output-root autodl-tmp/surrogate/runs
+
   训练 RMNet:
     python surrogate/train_radiomap3dseer_surrogate.py \
       --model-type rmnet \
       --data-root /path/to/RadioMap3DSeer \
       --output-root surrogate/runs
+  训练 U-Net:
+    python surrogate/train_radiomap3dseer_surrogate.py \
+      --model-type unet \
+      --data-root /path/to/RadioMap3DSeer \
+      --output-root surrogate/runs
+  训练 TransUNet:
+    python surrogate/train_radiomap3dseer_surrogate.py \
+      --model-type transunet \
+      --data-root /path/to/RadioMap3DSeer \
+      --output-root surrogate/runs
+  训练 RadioUNet:
+    python surrogate/train_radiomap3dseer_surrogate.py \
+      --model-type radiounet \
+      --data-root /path/to/RadioMap3DSeer \
+      --output-root surrogate/runs
+  只评估已有权重:
+    python surrogate/train_radiomap3dseer_surrogate.py \
+      --model-type rmnet \
+      --data-root /path/to/RadioMap3DSeer \
+      --checkpoint surrogate/checkpoints/rmnet_radiomap3dseer.pt \
+      --csv-file /path/to/eval_pairs.csv \
+      --eval-only
 
 参数说明:
-  --model-type: 模型类型，pmnet 或 rmnet。
+  --model-type: 模型类型，pmnet / rmnet / unet / transunet / radiounet / radionet。
   --data-root: RadioMap3DSeer 数据集根目录，内部应包含 png/ 与 gain/。
   --csv-file: 可选样本 CSV；为空则自动扫描 gain/。
+  --checkpoint: 评估模式或继续训练时使用的已有权重路径。
   --output-root: 输出目录，保存日志、配置、history、best checkpoint 与 summary。
   --output-stride: 模型输出步长，8 或 16。
   --batch-size: batch 大小。
@@ -33,6 +62,7 @@
   --num-workers: DataLoader worker 数量。
   --log-every: 每多少个 step 打印一次训练 loss。
   --seed: 随机种子。
+  --eval-only: 只对给定样本集做评估，不训练。
   --use-height / --no-use-height: 是否使用带高度的 buildings / antenna 图。
 """
 
@@ -51,17 +81,22 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-from data_surrogate import RadioMap3DSeerDataset, resolve_radiomap_sample_pairs
-from model_pmnet import build_pmnet
-from model_rmnet import build_rmnet
-from utils import MAE, MSE, R2, RMSE, get_device, load_checkpoint, save_checkpoint, set_seed
+try:
+    from .data_surrogate import RadioMap3DSeerDataset, resolve_radiomap_sample_pairs
+    from .model_registry import ALL_MODEL_TYPES, build_model, select_prediction
+    from .utils import MAE, MSE, R2, RMSE, get_device, load_checkpoint, save_checkpoint, save_training_plots, set_seed
+except ImportError:
+    from data_surrogate import RadioMap3DSeerDataset, resolve_radiomap_sample_pairs
+    from model_registry import ALL_MODEL_TYPES, build_model, select_prediction
+    from utils import MAE, MSE, R2, RMSE, get_device, load_checkpoint, save_checkpoint, save_training_plots, set_seed
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train PMNet/RMNet from scratch on RadioMap3DSeer.")
-    parser.add_argument("--model-type", required=True, choices=["pmnet", "rmnet"])
+    parser = argparse.ArgumentParser(description="Train or evaluate surrogate models on RadioMap3DSeer.")
+    parser.add_argument("--model-type", required=True, choices=ALL_MODEL_TYPES)
     parser.add_argument("--data-root", required=True, type=str)
     parser.add_argument("--csv-file", type=str)
+    parser.add_argument("--checkpoint", type=str)
     parser.add_argument("--output-root", default="./surrogate_runs", type=str)
     parser.add_argument("--output-stride", default=16, choices=[8, 16], type=int)
     parser.add_argument("--batch-size", default=16, type=int)
@@ -77,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", default=4, type=int)
     parser.add_argument("--log-every", default=100, type=int)
     parser.add_argument("--seed", default=42, type=int)
+    parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--use-height", dest="use_height", action="store_true")
     parser.add_argument("--no-use-height", dest="use_height", action="store_false")
     parser.set_defaults(use_height=True)
@@ -88,6 +124,7 @@ class RadioMapTrainConfig:
     model_type: str
     data_root: str
     csv_file: str | None
+    checkpoint: str | None
     output_root: str
     output_stride: int
     batch_size: int
@@ -102,6 +139,7 @@ class RadioMapTrainConfig:
     num_workers: int
     log_every: int
     seed: int
+    eval_only: bool
     use_height: bool
 
     @property
@@ -115,12 +153,6 @@ class RadioMapTrainConfig:
     @property
     def run_name(self) -> str:
         return f"{self.model_type}_radiomap3dseer"
-
-
-def build_model(model_type: str, output_stride: int):
-    if model_type == "pmnet":
-        return build_pmnet(output_stride=output_stride)
-    return build_rmnet(output_stride=output_stride)
 
 
 def build_config(args: argparse.Namespace) -> RadioMapTrainConfig:
@@ -160,7 +192,7 @@ def evaluate(model, loader, device) -> tuple[float, float, float]:
             inputs = inputs.to(device)
             targets = targets.to(device)
             # torch.clamp 限制输出范围在 [0,1]
-            preds = torch.clamp(model(inputs), 0, 1)
+            preds = torch.clamp(select_prediction(model(inputs)), 0, 1)
             # inputs.size(0) == batch_size 各个指标返回的都是整个这批样本的均值
             total_rmse += RMSE(preds, targets).item() * inputs.size(0)
             total_mae += MAE(preds, targets).item() * inputs.size(0)
@@ -168,6 +200,20 @@ def evaluate(model, loader, device) -> tuple[float, float, float]:
             total_samples += inputs.size(0)
     denom = max(total_samples, 1)
     return total_rmse / denom, total_mae / denom, total_r2 / denom
+
+
+def build_eval_loader(cfg: RadioMapTrainConfig) -> DataLoader:
+    sample_pairs = resolve_radiomap_sample_pairs(cfg.data_root, cfg.csv_file)
+    dataset = RadioMap3DSeerDataset(cfg.data_root, sample_pairs, use_height=cfg.use_height)
+    return DataLoader(
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=cfg.num_workers > 0,
+        drop_last=False,
+    )
 
 
 def build_train_val_test_loaders(cfg: RadioMapTrainConfig, run_dir: Path):
@@ -231,8 +277,30 @@ def main() -> None:
         # 把配置对象 cfg 转成普通字典，再以 JSON 格式写入已经打开的文件对象 handle 中，并且用 2 个空格缩进
         json.dump(asdict(cfg), handle, indent=2)
 
+    model = build_model(cfg.model_type, output_stride=cfg.output_stride, in_channels=2)
+    if cfg.checkpoint:
+        load_checkpoint(model, cfg.checkpoint, strict=True)
+    model = model.to(device)
+
+    if cfg.eval_only:
+        if not cfg.checkpoint:
+            raise ValueError("--eval-only requires --checkpoint")
+        eval_loader = build_eval_loader(cfg)
+        eval_rmse, eval_mae, eval_r2 = evaluate(model, eval_loader, device)
+        summary = {
+            "dataset": "radiomap3dseer",
+            "model_type": cfg.model_type,
+            "checkpoint": cfg.checkpoint,
+            "eval_rmse": eval_rmse,
+            "eval_mae": eval_mae,
+            "eval_r2": eval_r2,
+        }
+        with (run_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2)
+        print(json.dumps(summary, indent=2))
+        return
+
     train_loader, val_loader, test_loader = build_train_val_test_loaders(cfg, run_dir)
-    model = build_model(cfg.model_type, cfg.output_stride).to(device)
     optimizer = optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=cfg.step, gamma=cfg.lr_decay)
 
@@ -255,7 +323,7 @@ def main() -> None:
                 targets = targets.to(device)
 
                 optimizer.zero_grad(set_to_none=True)
-                preds = model(inputs)
+                preds = select_prediction(model(inputs))
                 # nn.MSELoss() 默认 reduction = 'mean'
                 loss = MSE(preds, targets)
                 loss.backward()
@@ -298,8 +366,14 @@ def main() -> None:
             save_history_csv(history, run_dir / "history.csv")
             with (run_dir / "history.json").open("w", encoding="utf-8") as handle:
                 json.dump(history, handle, indent=2)
+            save_training_plots(
+                history=history,
+                output_path=run_dir / "training_curves.png",
+                title=f"RadioMap3DSeer / {cfg.model_type}",
+                metric_keys=("train_loss", "val_rmse", "val_mae", "val_r2", "best_val_rmse", "lr"),
+            )
 
-    best_model = build_model(cfg.model_type, cfg.output_stride)
+    best_model = build_model(cfg.model_type, output_stride=cfg.output_stride, in_channels=2)
     load_checkpoint(best_model, str(best_checkpoint_path), strict=True)
     best_model = best_model.to(device)
     test_rmse, test_mae, test_r2 = evaluate(best_model, test_loader, device)

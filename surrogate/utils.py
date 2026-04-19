@@ -1,6 +1,6 @@
 """
 用途:
-  共享训练/评估运行时工具，例如设备选择、随机种子、指标函数、checkpoint 读写。
+  共享训练/评估运行时工具，例如设备选择、随机种子、指标函数、checkpoint 读写与训练曲线绘图。
 
 直接运行命令:
   无。该文件是公共模块，不单独运行。
@@ -20,11 +20,17 @@
   save_checkpoint(model, checkpoint_path)
     model: 要保存的模型。
     checkpoint_path: 输出权重路径。
+  save_training_plots(history, output_path, title, metric_keys)
+    history: 训练历史列表，每个元素是按 epoch 记录的字典。
+    output_path: 输出 PNG 路径。
+    title: 图标题。
+    metric_keys: 要绘制的指标字段名列表。
 """
 
 from __future__ import annotations
 
 import random
+import os
 from pathlib import Path
 
 import numpy as np
@@ -88,3 +94,66 @@ def load_checkpoint(model: torch.nn.Module, checkpoint_path: str, strict: bool =
 def save_checkpoint(model: torch.nn.Module, checkpoint_path: Path) -> None:
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), checkpoint_path)
+
+
+def save_training_plots(
+    history: list[dict],
+    output_path: Path,
+    title: str,
+    metric_keys: tuple[str, ...],
+) -> None:
+    if not history:
+        return
+
+    import math
+
+    mpl_config_dir = output_path.parent / ".mpl-cache"
+    mpl_config_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
+    os.environ.setdefault("XDG_CACHE_HOME", str(mpl_config_dir))
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = [row["epoch"] for row in history if "epoch" in row]
+    if not epochs:
+        return
+
+    valid_metric_keys = []
+    for key in metric_keys:
+        values = [row.get(key) for row in history]
+        if any(value is not None for value in values):
+            valid_metric_keys.append(key)
+
+    if not valid_metric_keys:
+        return
+
+    ncols = 2 if len(valid_metric_keys) > 1 else 1
+    nrows = math.ceil(len(valid_metric_keys) / ncols)
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(6 * ncols, 3.8 * nrows))
+    axes = np.atleast_1d(axes).reshape(-1)
+
+    for ax, key in zip(axes, valid_metric_keys):
+        xs = []
+        ys = []
+        for row in history:
+            value = row.get(key)
+            if value is None:
+                continue
+            xs.append(row["epoch"])
+            ys.append(value)
+        ax.plot(xs, ys, marker="o", linewidth=1.8, markersize=3)
+        ax.set_title(key)
+        ax.set_xlabel("epoch")
+        ax.grid(True, alpha=0.3)
+
+    for ax in axes[len(valid_metric_keys) :]:
+        ax.axis("off")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)

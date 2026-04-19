@@ -6,7 +6,7 @@
   无。该文件是环境模块，供主入口导入。
 
 参数说明:
-  RadioMapEnv(city_map_path, goal, constraints, user_request='', init_locs=None, pmnet=None, candidate_sample=64, seed=42)
+  RadioMapEnv(city_map_path, goal, constraints, user_request='', init_locs=None, pmnet=None, candidate_sample=64, seed=42, eval_device='mps')
     city_map_path: 输入建筑高度图路径。
     goal: 目标字典，如 coverage/capacity 目标。
     constraints: 约束字典，如 site_limit/site_exact。
@@ -15,6 +15,7 @@
     pmnet: 自定义评估函数；为空则使用默认 PMNet 代理。
     candidate_sample: observation 中展示的候选点数量上限。
     seed: 随机种子。
+    eval_device: 默认 PMNet/RMNet 评估设备。
 """
 
 from __future__ import annotations
@@ -76,6 +77,8 @@ def height_from_gray(gray: float) -> float:
 
 def build_candidates(pixel_map: np.ndarray) -> List[Dict[str, Any]]:
     action_mask = calc_action_mask(pixel_map)
+    # action_mask返回0或1的32*32的动作空间采样块中心位置的坐标
+    # np.where(action_mask > 0.5)返回一个tuple，返回的是“索引位置”，而不是值本身，需要[0]解引用得到(768,)
     action_ids = np.where(action_mask > 0.5)[0]
     candidates: List[Dict[str, Any]] = []
     for aid in action_ids:
@@ -97,6 +100,7 @@ def build_candidates(pixel_map: np.ndarray) -> List[Dict[str, Any]]:
 def sample_candidates(candidates: List[Dict[str, Any]], k: int, rng: np.random.Generator) -> List[Dict[str, Any]]:
     if k <= 0 or k >= len(candidates):
         return candidates
+    # 随机采样（无放回抽样），从candidates长度中抽取k个索引位置
     idx = rng.choice(len(candidates), size=k, replace=False)
     return [candidates[int(i)] for i in idx]
 
@@ -108,6 +112,21 @@ class Metrics:
     redundancy_rate: float
 
 
+def evaluate_site_count_constraints(constraints: Dict[str, Any], site_count: int) -> Dict[str, Any]:
+    site_limit = constraints.get("site_limit")
+    site_exact = constraints.get("site_exact")
+    site_over = None if site_limit is None else max(0, site_count - int(site_limit))
+    site_gap = None if site_exact is None else max(0, int(site_exact) - site_count)
+    return {
+        "site_limit": site_limit,
+        "site_exact": site_exact,
+        "site_over": site_over,
+        "site_gap": site_gap,
+        "within_limit": site_over in (None, 0),
+        "exact_satisfied": site_gap in (None, 0),
+    }
+
+
 class RadioMapEnv(gym.Env):
     def __init__(
         self,
@@ -117,14 +136,18 @@ class RadioMapEnv(gym.Env):
         user_request: str = "",
         init_locs: Optional[List[Tuple[int, int]]] = None,
         pmnet=None,
-        candidate_sample: int = 64,
+        candidate_sample: int = 16,
         seed: int = 42,
+        eval_device: str = "mps",
     ) -> None:
         super().__init__()
+        # 0-255 -> 0-1
         self.pixel_map = load_map_normalized(city_map_path)
+        self.eval_device = eval_device
+        # 默认使用PMNet
         if pmnet is None:
-            load_pmnet()
-            self.pmnet = infer_pmnet
+            load_pmnet(device=eval_device)
+            self.pmnet = lambda inputs: infer_pmnet(inputs, device=eval_device)
         else:
             self.pmnet = pmnet
         self.goal = goal
@@ -157,6 +180,7 @@ class RadioMapEnv(gym.Env):
         return metrics
 
     def _payload(self) -> Dict[str, Any]:
+        # 随机抽样
         sample = sample_candidates(self.candidates, self.candidate_sample, self.rng)
         metrics = None
         if self.last_metrics is not None:
@@ -168,14 +192,15 @@ class RadioMapEnv(gym.Env):
 
         target_cov = self.goal.get("targets", {}).get("coverage_pct")
         target_cap = self.goal.get("targets", {}).get("capacity")
+        # redundancy_rate字段由两部分组成
         redundancy_target = normalize_redundancy_target(self.goal.get("targets", {}).get("redundancy_rate"))
-        site_limit = self.constraints.get("site_limit")
-        site_exact = self.constraints.get("site_exact")
+        site_count_status = evaluate_site_count_constraints(self.constraints, len(self.tx_locs))
         cov_gap = None if metrics is None or target_cov is None else float(target_cov) - metrics["coverage"]
         cap_gap = None if metrics is None or target_cap is None else float(target_cap) - metrics["capacity"]
         red_gap = None
         red_state = None
         if metrics is not None:
+            # metrics["redundancy_rate"]是当前状态计算得到的冗余率
             deviation = abs(float(metrics["redundancy_rate"]) - float(redundancy_target["ideal"]))
             red_gap = max(0.0, deviation - float(redundancy_target["tolerance"]))
             if deviation <= float(redundancy_target["tolerance"]):
@@ -184,8 +209,8 @@ class RadioMapEnv(gym.Env):
                 red_state = "too_low"
             else:
                 red_state = "too_high"
-        site_over = None if site_limit is None else max(0, len(self.tx_locs) - int(site_limit))
-        site_gap = None if site_exact is None else max(0, int(site_exact) - len(self.tx_locs))
+        site_over = site_count_status["site_over"]
+        site_gap = site_count_status["site_gap"]
         miss_type = []
         if cov_gap is not None and cov_gap > 0:
             miss_type.append("coverage_shortfall")
@@ -195,7 +220,7 @@ class RadioMapEnv(gym.Env):
             miss_type.append(f"redundancy_{red_state}")
         if site_over is not None and site_over > 0:
             miss_type.append("site_over_limit")
-        if site_gap is not None and site_gap > 0:
+        if site_count_status["site_exact"] is not None and site_gap is not None and site_gap > 0:
             miss_type.append("site_count_shortfall")
 
         payload = {
@@ -211,7 +236,7 @@ class RadioMapEnv(gym.Env):
             "candidates": sample,
             "step": self.steps,
             "diagnosis": {
-                "ok": len(miss_type) == 0,
+                "ok": len(miss_type) == 0 and site_count_status["within_limit"] and site_count_status["exact_satisfied"],
                 "miss_type": miss_type,
                 "margins": {
                     "coverage_gap": cov_gap,
@@ -231,6 +256,7 @@ class RadioMapEnv(gym.Env):
     def reset(self, seed=None, return_info=False, options=None, idx=None):
         self.steps = 0
         self._evaluate()
+        # 把Python 字典（dict）对象转为json字符串
         obs = json.dumps(self._payload(), ensure_ascii=True)
         info = {"steps": self.steps, "answer": None}
         return obs, info
@@ -239,6 +265,7 @@ class RadioMapEnv(gym.Env):
         action = action.strip()
         if action.startswith("DECIDE[") and action.endswith("]"):
             action = action[len("DECIDE[") : -1]
+        # json解析为Python字典对象
         data = json.loads(action)
         if "selected_action" in data:
             return data["selected_action"]
@@ -251,11 +278,12 @@ class RadioMapEnv(gym.Env):
         cap_target = self.goal.get("targets", {}).get("capacity")
         if cap_target is not None and metrics.capacity < float(cap_target):
             return False
-        site_exact = self.constraints.get("site_exact")
-        if site_exact is not None and len(self.tx_locs) != int(site_exact):
+        site_count_status = evaluate_site_count_constraints(self.constraints, len(self.tx_locs))
+        site_exact = site_count_status["site_exact"]
+        if site_exact is not None and not site_count_status["exact_satisfied"]:
             return False
-        site_limit = self.constraints.get("site_limit")
-        if site_limit is not None and len(self.tx_locs) > int(site_limit):
+        site_limit = site_count_status["site_limit"]
+        if site_limit is not None and not site_count_status["within_limit"]:
             return False
         return True
 
@@ -268,12 +296,17 @@ class RadioMapEnv(gym.Env):
         info: Dict[str, Any] = {"steps": self.steps}
 
         try:
+            # 解析LLM输出的DECIDE[]中的selected_action字段
             selected = self._parse_action(action)
         except Exception as exc:
             obs = f"Invalid action: {exc}"
             self.steps += 1
+            # obs, reward, terminated, truncated, info
             return obs, reward, True, False, info
 
+        # DECIDE[{"parsed_request": {...}, "metrics_snapshot": {"coverage": 0.0, "capacity": 0.0, "redundancy_rate": 0.0},
+        # "rationale": "...", "selected_action": {"name": "...", "args": {...}}}]
+        # DECIDE[{"rationale": "...", "weights": {"w_cov": 0.3, "w_cap": 0.2, "w_red": 0.4, "w_sites": 0.1}}]
         name = selected.get("name")
         args = selected.get("args", {}) or {}
 
@@ -283,11 +316,13 @@ class RadioMapEnv(gym.Env):
                 info["error"] = "empty_proposal"
             else:
                 for site in sites:
+                    # _clamp_loc把坐标裁剪到合法地图范围内
                     row, col = self._clamp_loc(int(site.get("row", 0)), int(site.get("col", 0)))
                     self.tx_locs.append((row, col))
         elif name == "Refine":
             delta = args.get("rule_or_delta") or {}
             op = delta.get("op")
+            # 移动一个已有站点
             if op == "move":
                 idx = int(delta.get("id", -1))
                 if 0 <= idx < len(self.tx_locs):
@@ -317,8 +352,15 @@ class RadioMapEnv(gym.Env):
             info["error"] = "unknown_action"
 
         metrics = self._evaluate()
+        # 在当前这条 ReAct 决策链里是可行的，因为这里真正决定动作的不是 reward，而是 _objective_score 和加权候选打分
         reward = metrics.coverage
         done = self._is_done(metrics)
         obs = json.dumps(self._payload(), ensure_ascii=True)
         self.steps += 1
         return obs, reward, done, False, info
+
+if __name__ == "__main__":
+    city_map_path = "/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/0.png"
+    pixel_map = load_map_normalized(city_map_path)
+    candidates = build_candidates(pixel_map)
+    print(len(candidates))

@@ -70,7 +70,7 @@ def solve_target_layout(
     max_evals: int = 200,
     candidate_stride: int = 8,
     candidate_limit: int = 500,
-    device: str = "cpu",
+    device: str = "mps",
 ) -> tuple[list[tuple[int, int]], dict]:
     script_name = SCRIPT_MAP.get(planner_name)
     if script_name is None:

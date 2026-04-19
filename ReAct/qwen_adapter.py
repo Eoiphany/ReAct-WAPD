@@ -32,10 +32,10 @@ def _resolve_device(device: str) -> str:
         return device
     import torch
 
-    if torch.cuda.is_available():
-        return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
     return "cpu"
 
 
@@ -54,7 +54,7 @@ def _resolve_dtype(dtype: str):
     return mapping[dtype]
 
 
-def load_qwen_bundle(model_path: str, device: str = "auto", dtype: str = "auto"):
+def load_qwen_bundle(model_path: str, device: str = "mps", dtype: str = "auto"):
     resolved_path = str(Path(model_path).expanduser().resolve())
     resolved_device = _resolve_device(device)
     cache_key = (resolved_path, resolved_device, dtype)
@@ -85,7 +85,7 @@ def load_qwen_bundle(model_path: str, device: str = "auto", dtype: str = "auto")
 def call_qwen_chat(
     model_path: str,
     messages: List[Dict[str, str]],
-    device: str = "auto",
+    device: str = "mps",
     dtype: str = "auto",
     max_new_tokens: int = 320,
     do_sample: bool = False,

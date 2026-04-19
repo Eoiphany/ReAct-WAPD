@@ -1,0 +1,3 @@
+Coverage and capacity are both primary goals. Target coverage >= 90% and average capacity >= 3.5 bps/Hz in ROI.
+Keep site count <= 8. If one target is already met, prefer actions that reduce the remaining gap without blindly adding sites.
+Do not optimize redundancy in this request.

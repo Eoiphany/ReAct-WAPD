@@ -134,7 +134,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model-path", required=True, type=str, help="Checkpoint path")
     parser.add_argument("--network-type", required=True, type=str, help="Network type")
-    parser.add_argument("--device", default="cpu", type=str, help="Torch device, e.g. cpu/cuda/mps")
+    parser.add_argument("--device", default="mps", type=str, help="Torch device, e.g. cpu/cuda/mps")
     return parser.parse_args()
 
 

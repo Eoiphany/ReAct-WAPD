@@ -230,7 +230,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", required=True, type=str, help="Checkpoint path")
     parser.add_argument("--network-type", required=True, type=str, help="Network type")
     parser.add_argument("--output-dir", required=True, type=str, help="Output directory")
-    parser.add_argument("--device", default="cpu", type=str, help="Torch device, e.g. cpu/cuda/mps")
+    parser.add_argument("--device", default="mps", type=str, help="Torch device, e.g. cpu/cuda/mps")
     parser.add_argument("--d-min", default=12.0, type=float, help="Minimum pairwise site distance in pixels")
     parser.add_argument("--repair-max-tries", default=100, type=int, help="Maximum attempts when repairing one site")
     parser.add_argument("--w1", default=1.0, type=float, help="Penalty weight for coverage shortfall")

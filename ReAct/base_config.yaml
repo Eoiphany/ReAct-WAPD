@@ -3,7 +3,7 @@ env:
   action_space_size: 32
   roi_is_black: true
   roi_threshold: 0.01
-  tx_is_black: true
+  tx_is_black: false
   tx_threshold: 0.01
   coverage_threshold_db: -117.0
   noise_coefficient_db: 10.0
@@ -33,9 +33,12 @@ llamafactory:
 
 qwen:
   model_path: Qwen/Qwen2.5-7B
-  device: auto
+  device: mps
   dtype: auto
   max_new_tokens: 320
+
+runtime:
+  eval_device: mps
 
 paths:
   prompt_path: prompts/radiomap.json

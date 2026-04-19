@@ -1,6 +1,6 @@
 """
 用途:
-  在 USC 数据集上训练 PMNet 或 RMNet，并保存验证集上表现最好的权重。
+  在 USC 数据集上训练代理模型，并保存验证集上表现最好的权重。
 
 示例命令:
   训练 PMNet:
@@ -13,6 +13,21 @@
       --model-type rmnet \
       --data-root /path/to/usc \
       --output-root surrogate/runs
+  训练 U-Net:
+    python surrogate/train_usc_surrogate.py \
+      --model-type unet \
+      --data-root /path/to/usc \
+      --output-root surrogate/runs
+  训练 TransUNet:
+    python surrogate/train_usc_surrogate.py \
+      --model-type transunet \
+      --data-root /path/to/usc \
+      --output-root surrogate/runs
+  训练 RadioUNet:
+    python surrogate/train_usc_surrogate.py \
+      --model-type radiounet \
+      --data-root /path/to/usc \
+      --output-root surrogate/runs
   只评估已有权重:
     python surrogate/train_usc_surrogate.py \
       --model-type pmnet \
@@ -22,7 +37,7 @@
       --eval-only
 
 参数说明:
-  --model-type: 模型类型，pmnet 或 rmnet。
+  --model-type: 模型类型，pmnet / rmnet / unet / transunet / radiounet / radionet。
   --data-root: USC 数据集根目录，内部应包含 map/、Tx/、pmap/。
   --csv-file: 可选样本列表 CSV；训练时为空则自动读 Data_coarse_train.csv 或扫描 pmap/。
   --checkpoint: 评估模式或继续训练时使用的已有权重路径。
@@ -55,15 +70,19 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-from data_surrogate import USCDataset, resolve_usc_sample_ids
-from model_pmnet import build_pmnet
-from model_rmnet import build_rmnet
-from utils import MSE, RMSE, get_device, load_checkpoint, save_checkpoint, set_seed
+try:
+    from .data_surrogate import USCDataset, resolve_usc_sample_ids
+    from .model_registry import ALL_MODEL_TYPES, build_model, select_prediction
+    from .utils import MSE, RMSE, get_device, load_checkpoint, save_checkpoint, save_training_plots, set_seed
+except ImportError:
+    from data_surrogate import USCDataset, resolve_usc_sample_ids
+    from model_registry import ALL_MODEL_TYPES, build_model, select_prediction
+    from utils import MSE, RMSE, get_device, load_checkpoint, save_checkpoint, save_training_plots, set_seed
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train or evaluate PMNet/RMNet on the USC dataset.")
-    parser.add_argument("--model-type", required=True, choices=["pmnet", "rmnet"])
+    parser = argparse.ArgumentParser(description="Train or evaluate surrogate models on the USC dataset.")
+    parser.add_argument("--model-type", required=True, choices=ALL_MODEL_TYPES)
     parser.add_argument("--data-root", required=True, type=str)
     parser.add_argument("--csv-file", type=str)
     parser.add_argument("--checkpoint", type=str)
@@ -114,12 +133,6 @@ class USCTrainConfig:
         return f"{self.model_type}_usc"
 
 
-def build_model(model_type: str, output_stride: int):
-    if model_type == "pmnet":
-        return build_pmnet(output_stride=output_stride)
-    return build_rmnet(output_stride=output_stride)
-
-
 def build_config(args: argparse.Namespace) -> USCTrainConfig:
     return USCTrainConfig(**vars(args))
 
@@ -147,7 +160,7 @@ def evaluate(model, loader, device) -> float:
         for inputs, targets in tqdm(loader, desc="Eval", leave=False):
             inputs = inputs.to(device)
             targets = targets.to(device)
-            preds = torch.clamp(model(inputs), 0, 1)
+            preds = torch.clamp(select_prediction(model(inputs)), 0, 1)
             batch_rmse = RMSE(preds, targets)
             total_rmse += batch_rmse.item() * inputs.size(0)
             total_samples += inputs.size(0)
@@ -200,7 +213,7 @@ def main() -> None:
     with (run_dir / "config.json").open("w", encoding="utf-8") as handle:
         json.dump(asdict(cfg), handle, indent=2)
 
-    model = build_model(cfg.model_type, cfg.output_stride)
+    model = build_model(cfg.model_type, output_stride=cfg.output_stride, in_channels=2)
     if cfg.checkpoint:
         load_checkpoint(model, cfg.checkpoint, strict=True)
     model = model.to(device)
@@ -243,7 +256,7 @@ def main() -> None:
                 targets = targets.to(device)
 
                 optimizer.zero_grad(set_to_none=True)
-                preds = model(inputs)
+                preds = select_prediction(model(inputs))
                 loss = MSE(preds, targets)
                 loss.backward()
                 optimizer.step()
@@ -279,6 +292,12 @@ def main() -> None:
             save_history_csv(history, run_dir / "history.csv")
             with (run_dir / "history.json").open("w", encoding="utf-8") as handle:
                 json.dump(history, handle, indent=2)
+            save_training_plots(
+                history=history,
+                output_path=run_dir / "training_curves.png",
+                title=f"USC / {cfg.model_type}",
+                metric_keys=("train_loss", "val_rmse", "best_val_rmse", "lr"),
+            )
 
     summary = {
         "dataset": "usc",

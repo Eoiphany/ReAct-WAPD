@@ -3,6 +3,8 @@
 .vscode/
 .DS_Store
 
+usc-data/
+
 /Autobs/__pycache__/
 /Autobs/.cache/
 /Autobs/.mplconfig/
@@ -47,4 +49,4 @@
 /surrogate/blender_scene/paris/output_dataset/
 /surrogate/blender_scene/paris/README.md
 /surrogate/checkpoints/
-/surrogate/vis/
+/surrogate/test/

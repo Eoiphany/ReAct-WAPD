@@ -48,7 +48,7 @@ except ModuleNotFoundError:
 
     gym = _SimpleGym()
 
-
+# HistoryWrapper：把轨迹历史拼成新的 observation
 class HistoryWrapper(gym.ObservationWrapper):
     def __init__(self, env, obs_format, prompt=None):
         super().__init__(env)
@@ -59,8 +59,15 @@ class HistoryWrapper(gym.ObservationWrapper):
     def observation(self, obs):
         if self.obs_format == "obs":
             return obs
+        # self.env.traj = {
+        #     "observations": [...],
+        #     "actions": [...],
+        #     "rationales": [...]
+        # }
         observation = self.env.traj["observations"][0] + "\n"
         rationales = self.env.traj.get("rationales", [])
+        # o0 是初始状态，没有对应 action 从 o1 开始，每个 observation 都是“执行某个 action 的结果”
+        # start 从 1 开始编号，而不是默认的 0
         for i, (o, a) in enumerate(zip(self.env.traj["observations"][1:], self.env.traj["actions"]), 1):
             rationale = rationales[i - 1] if (i - 1) < len(rationales) else ""
             if rationale:
@@ -68,7 +75,7 @@ class HistoryWrapper(gym.ObservationWrapper):
             observation += f"Action {i}: {a}\nObservation {i}: {o}\n\n"
         return self.prompt + observation
 
-
+# LoggingWrapper：把轨迹缓存下来并在 close() 时写 JSON
 class LoggingWrapper(gym.Wrapper):
     def __init__(self, env, folder="outputs/trajs", file_id=None):
         super().__init__(env)
