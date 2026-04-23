@@ -4,38 +4,42 @@
 
 示例命令:
   训练 PMNet:
-    python surrogate/train_usc_surrogate.py \
+    python autodl-tmp/surrogate/train_usc_surrogate.py \
       --model-type pmnet \
-      --data-root /path/to/usc \
+      --data-root autodl-tmp/usc/ \
       --output-root surrogate/runs
+      
   训练 RMNet:
     python surrogate/train_usc_surrogate.py \
       --model-type rmnet \
-      --data-root /path/to/usc \
+      --data-root autodl-tmp/usc/ \
       --output-root surrogate/runs
   训练 U-Net:
     python surrogate/train_usc_surrogate.py \
       --model-type unet \
-      --data-root /path/to/usc \
+      --data-root autodl-tmp/usc/ \
       --output-root surrogate/runs
   训练 TransUNet:
     python surrogate/train_usc_surrogate.py \
       --model-type transunet \
-      --data-root /path/to/usc \
+      --data-root autodl-tmp/usc/ \
       --output-root surrogate/runs
   训练 RadioUNet:
     python surrogate/train_usc_surrogate.py \
       --model-type radiounet \
-      --data-root /path/to/usc \
+      --data-root autodl-tmp/usc/ \
       --output-root surrogate/runs
+      
   只评估已有权重:
     python surrogate/train_usc_surrogate.py \
       --model-type pmnet \
-      --data-root /path/to/usc \
-      --csv-file /path/to/eval_ids.csv \
-      --checkpoint surrogate/checkpoints/pmnet_usc.pt \
+      --data-root /Users/epiphanyer/Desktop/coding/paper_experiment/usc-data \
+      --csv-file autodl-tmp/usc/eval_ids.csv \
+      --output-root /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/eval_runs \
+      --checkpoint /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/runs/pmnet_usc/16_0.0005_0.5_10/pmnet_usc_best.pt \
       --eval-only
-
+      --eval-split val
+      
 参数说明:
   --model-type: 模型类型，pmnet / rmnet / unet / transunet / radiounet / radionet。
   --data-root: USC 数据集根目录，内部应包含 map/、Tx/、pmap/。
@@ -55,6 +59,7 @@
   --log-every: 每多少个 step 打印一次训练 loss。
   --seed: 随机种子。
   --eval-only: 只做评估，不训练；此时建议显式传入 --csv-file 与 --checkpoint。
+  --eval-split: 评估 USC 时使用 all / train / val 哪个样本集合；若传了 --csv-file，则以 CSV 为准。
 """
 
 from __future__ import annotations
@@ -73,11 +78,29 @@ from tqdm import tqdm
 try:
     from .data_surrogate import USCDataset, resolve_usc_sample_ids
     from .model_registry import ALL_MODEL_TYPES, build_model, select_prediction
-    from .utils import MSE, RMSE, get_device, load_checkpoint, save_checkpoint, save_training_plots, set_seed
+    from .utils import (
+        MSE,
+        build_prefixed_metric_summary,
+        compute_regression_metrics,
+        get_device,
+        load_checkpoint,
+        save_checkpoint,
+        save_training_plots,
+        set_seed,
+    )
 except ImportError:
     from data_surrogate import USCDataset, resolve_usc_sample_ids
     from model_registry import ALL_MODEL_TYPES, build_model, select_prediction
-    from utils import MSE, RMSE, get_device, load_checkpoint, save_checkpoint, save_training_plots, set_seed
+    from utils import (
+        MSE,
+        build_prefixed_metric_summary,
+        compute_regression_metrics,
+        get_device,
+        load_checkpoint,
+        save_checkpoint,
+        save_training_plots,
+        set_seed,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,6 +123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", default=100, type=int)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--eval-split", default="all", choices=["all", "train", "val"], type=str)
     return parser.parse_args()
 
 
@@ -123,6 +147,7 @@ class USCTrainConfig:
     log_every: int
     seed: int
     eval_only: bool
+    eval_split: str
 
     @property
     def param_str(self) -> str:
@@ -144,7 +169,7 @@ def prepare_run_dir(cfg: USCTrainConfig) -> Path:
 
 
 def save_history_csv(history: list[dict], output_path: Path) -> None:
-    fieldnames = ["epoch", "train_loss", "val_rmse", "best_val_rmse", "lr"]
+    fieldnames = ["epoch", "train_loss", "val_mse", "val_rmse", "val_mae", "val_r2", "best_val_rmse", "lr"]
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -152,23 +177,64 @@ def save_history_csv(history: list[dict], output_path: Path) -> None:
             writer.writerow(row)
 
 
-def evaluate(model, loader, device) -> float:
+def split_sample_ids_deterministically(
+    sample_ids: list[str],
+    train_ratio: float,
+    seed: int,
+) -> tuple[list[str], list[str]]:
+    dataset_size = len(sample_ids)
+    train_size = int(dataset_size * train_ratio)
+    val_size = dataset_size - train_size
+    if train_size <= 0 or val_size <= 0:
+        raise ValueError(f"Invalid split sizes: train={train_size}, val={val_size}, total={dataset_size}")
+
+    split_generator = torch.Generator().manual_seed(seed)
+    indexed_ids = list(sample_ids)
+    train_dataset, val_dataset = random_split(indexed_ids, [train_size, val_size], generator=split_generator)
+    train_ids = [indexed_ids[item_index] for item_index in train_dataset.indices]
+    val_ids = [indexed_ids[item_index] for item_index in val_dataset.indices]
+    return train_ids, val_ids
+
+
+def save_split(sample_ids: list[str], output_path: Path) -> None:
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        for sample_id in sample_ids:
+            writer.writerow([sample_id])
+
+
+def evaluate(model, loader, device) -> tuple[dict[str, float], int]:
     model.eval()
-    total_rmse = 0.0
+    totals = {"rmse": 0.0, "mse": 0.0, "mae": 0.0, "r2": 0.0}
     total_samples = 0
     with torch.no_grad():
         for inputs, targets in tqdm(loader, desc="Eval", leave=False):
             inputs = inputs.to(device)
             targets = targets.to(device)
             preds = torch.clamp(select_prediction(model(inputs)), 0, 1)
-            batch_rmse = RMSE(preds, targets)
-            total_rmse += batch_rmse.item() * inputs.size(0)
-            total_samples += inputs.size(0)
-    return total_rmse / max(total_samples, 1)
+            batch_metrics = compute_regression_metrics(preds, targets)
+            batch_size = inputs.size(0)
+            for metric_name, metric_value in batch_metrics.items():
+                totals[metric_name] += metric_value * batch_size
+            total_samples += batch_size
+    denom = max(total_samples, 1)
+    metrics = {metric_name: metric_total / denom for metric_name, metric_total in totals.items()}
+    return metrics, total_samples
+
+
+def resolve_eval_sample_ids(cfg: USCTrainConfig) -> list[str]:
+    sample_ids = resolve_usc_sample_ids(cfg.data_root, cfg.csv_file)
+    if cfg.csv_file or cfg.eval_split == "all":
+        return sample_ids
+
+    train_ids, val_ids = split_sample_ids_deterministically(sample_ids, train_ratio=cfg.train_ratio, seed=cfg.seed)
+    if cfg.eval_split == "train":
+        return train_ids
+    return val_ids
 
 
 def build_eval_loader(cfg: USCTrainConfig) -> DataLoader:
-    sample_ids = resolve_usc_sample_ids(cfg.data_root, cfg.csv_file)
+    sample_ids = resolve_eval_sample_ids(cfg)
     dataset = USCDataset(cfg.data_root, sample_ids)
     return DataLoader(
         dataset,
@@ -183,15 +249,9 @@ def build_eval_loader(cfg: USCTrainConfig) -> DataLoader:
 
 def build_train_and_val_loaders(cfg: USCTrainConfig):
     sample_ids = resolve_usc_sample_ids(cfg.data_root, cfg.csv_file)
-    dataset = USCDataset(cfg.data_root, sample_ids)
-    dataset_size = len(dataset)
-    train_size = int(dataset_size * cfg.train_ratio)
-    val_size = dataset_size - train_size
-    if train_size <= 0 or val_size <= 0:
-        raise ValueError(f"Invalid split sizes: train={train_size}, val={val_size}, total={dataset_size}")
-
-    split_generator = torch.Generator().manual_seed(cfg.seed)
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=split_generator)
+    train_ids, val_ids = split_sample_ids_deterministically(sample_ids, train_ratio=cfg.train_ratio, seed=cfg.seed)
+    train_dataset = USCDataset(cfg.data_root, train_ids)
+    val_dataset = USCDataset(cfg.data_root, val_ids)
 
     loader_kwargs = dict(
         num_workers=cfg.num_workers,
@@ -201,7 +261,7 @@ def build_train_and_val_loaders(cfg: USCTrainConfig):
     )
     train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, **loader_kwargs)
-    return train_loader, val_loader
+    return train_loader, val_loader, train_ids, val_ids
 
 
 def main() -> None:
@@ -222,23 +282,28 @@ def main() -> None:
         if not cfg.checkpoint:
             raise ValueError("--eval-only requires --checkpoint")
         eval_loader = build_eval_loader(cfg)
-        eval_rmse = evaluate(model, eval_loader, device)
+        eval_metrics, eval_sample_count = evaluate(model, eval_loader, device)
         summary = {
             "dataset": "usc",
             "model_type": cfg.model_type,
             "checkpoint": cfg.checkpoint,
-            "eval_rmse": eval_rmse,
+            "eval_split": "csv" if cfg.csv_file else cfg.eval_split,
+            "eval_sample_count": eval_sample_count,
         }
+        summary.update(build_prefixed_metric_summary(eval_metrics, prefix="eval"))
         with (run_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2)
         print(json.dumps(summary, indent=2))
         return
 
-    train_loader, val_loader = build_train_and_val_loaders(cfg)
+    train_loader, val_loader, train_ids, val_ids = build_train_and_val_loaders(cfg)
+    save_split(train_ids, run_dir / "train_split.csv")
+    save_split(val_ids, run_dir / "val_split.csv")
     optimizer = optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=cfg.step, gamma=cfg.lr_decay)
 
     best_val_rmse = float("inf")
+    best_val_metrics: dict[str, float] | None = None
     best_checkpoint_path = run_dir / f"{cfg.model_type}_usc_best.pt"
     history: list[dict] = []
     global_step = 0
@@ -273,18 +338,22 @@ def main() -> None:
             current_lr = optimizer.param_groups[0]["lr"]
             scheduler.step()
 
-            val_rmse = None
+            val_metrics = None
             if epoch % cfg.val_freq == 0:
-                val_rmse = evaluate(model, val_loader, device)
-                if val_rmse < best_val_rmse:
-                    best_val_rmse = val_rmse
+                val_metrics, _ = evaluate(model, val_loader, device)
+                if val_metrics["rmse"] < best_val_rmse:
+                    best_val_rmse = val_metrics["rmse"]
+                    best_val_metrics = dict(val_metrics)
                     save_checkpoint(model, best_checkpoint_path)
 
             history.append(
                 {
                     "epoch": epoch + 1,
                     "train_loss": train_loss,
-                    "val_rmse": val_rmse,
+                    "val_mse": None if val_metrics is None else val_metrics["mse"],
+                    "val_rmse": None if val_metrics is None else val_metrics["rmse"],
+                    "val_mae": None if val_metrics is None else val_metrics["mae"],
+                    "val_r2": None if val_metrics is None else val_metrics["r2"],
                     "best_val_rmse": None if best_val_rmse == float("inf") else best_val_rmse,
                     "lr": current_lr,
                 }
@@ -296,15 +365,18 @@ def main() -> None:
                 history=history,
                 output_path=run_dir / "training_curves.png",
                 title=f"USC / {cfg.model_type}",
-                metric_keys=("train_loss", "val_rmse", "best_val_rmse", "lr"),
+                metric_keys=("train_loss", "val_mse", "val_rmse", "val_r2", "best_val_rmse", "lr"),
             )
 
     summary = {
         "dataset": "usc",
         "model_type": cfg.model_type,
+        "training_mode": "from_scratch",
         "best_val_rmse": best_val_rmse,
         "best_checkpoint": str(best_checkpoint_path),
     }
+    if best_val_metrics is not None:
+        summary.update(build_prefixed_metric_summary(best_val_metrics, prefix="best_val"))
     with (run_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
     print(json.dumps(summary, indent=2))

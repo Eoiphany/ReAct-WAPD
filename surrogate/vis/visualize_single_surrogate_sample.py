@@ -1,21 +1,22 @@
 """注释
 命令示例:
-python -m paper_experiment.surrogate.vis.visualize_single_surrogate_sample \
+python -m surrogate.vis.visualize_single_surrogate_sample \
   --dataset usc \
   --model-type pmnet \
-  --data-root /path/to/usc \
-  --checkpoint /path/to/pmnet_usc_best.pt \
+  --data-root /Users/epiphanyer/Desktop/coding/paper_experiment/usc-data \
+  --checkpoint /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/runs/pmnet_usc/16_0.0005_0.5_10/pmnet_usc_best.pt \
   --sample-id 42 \
-  --output-path /path/to/usc_42_compare.png
+  --output-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/output_pred/usc_42_compare.png
 
-python -m paper_experiment.surrogate.vis.visualize_single_surrogate_sample \
+python -m surrogate.vis.visualize_single_surrogate_sample \
   --dataset radiomap3dseer \
-  --model-type rmnet \
-  --data-root /path/to/RadioMap3DSeer \
-  --checkpoint /path/to/rmnet_radiomap3dseer_best.pt \
+  --model-type pmnet \
+  --data-root /Users/epiphanyer/Desktop/coding/paper_experiment/dataset \
+  --checkpoint /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/runs/pmnet_radiomap3dseer/16_0.0001_0.5_10/pmnet_radiomap3dseer_best.pt \
   --scene-id 348 \
   --tx-id 7 \
-  --output-path /path/to/348_7_compare.png
+  --output-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/output_pred/348_7_compare.png
+
 
 参数说明:
 - --dataset: 数据集类型，`usc` 或 `radiomap3dseer`。
@@ -34,7 +35,7 @@ python -m paper_experiment.surrogate.vis.visualize_single_surrogate_sample \
 脚本逻辑:
 - 按数据集类型定位单个样本，读取输入张量与标签张量。
 - 加载指定 checkpoint，对该样本做一次前向推理并裁剪到 `[0,1]`。
-- 输出一张 2x2 对比图：`Map`、`Tx`、`Inference`、`Label`，并写出该样本的 `rmse/mae/max_abs_error` 摘要。
+- 输出一张仅包含 `Inference` 与 `Label` 的对比图，并写出该样本的 `rmse/mae/max_abs_error` 摘要。
 """
 
 from __future__ import annotations
@@ -55,15 +56,11 @@ try:
         resolve_usc_sample_ids,
     )
     from ..model_registry import ALL_MODEL_TYPES, build_model, select_prediction
-    from ..utils import get_device, load_checkpoint
+    from ..utils import get_device, load_checkpoint, configure_plot_style
 except ImportError:
     from data_surrogate import RadioMap3DSeerDataset, USCDataset, resolve_radiomap_sample_pairs, resolve_usc_sample_ids
     from model_registry import ALL_MODEL_TYPES, build_model, select_prediction
-    from utils import get_device, load_checkpoint
-
-
-LATIN_FONT_FAMILY = "Times New Roman"
-CHINESE_FONT_CANDIDATES = ["SimSun", "Songti SC"]
+    from utils import get_device, load_checkpoint, configure_plot_style
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,24 +94,6 @@ def _prepare_matplotlib(output_path: Path) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
     os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir))
-
-
-def _configure_fonts() -> None:
-    import matplotlib
-    from matplotlib import font_manager
-
-    chinese_font = None
-    available = {font.name for font in font_manager.fontManager.ttflist}
-    for candidate in CHINESE_FONT_CANDIDATES:
-        if candidate in available:
-            chinese_font = candidate
-            break
-
-    family = [LATIN_FONT_FAMILY]
-    if chinese_font is not None:
-        family.append(chinese_font)
-    matplotlib.rcParams["font.family"] = family
-    matplotlib.rcParams["axes.unicode_minus"] = False
 
 
 def select_usc_sample(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str]:
@@ -191,47 +170,28 @@ def compute_sample_metrics(prediction: np.ndarray, label: np.ndarray) -> dict[st
 
 def save_sample_comparison_figure(
     *,
-    inputs: np.ndarray,
     prediction: np.ndarray,
     label: np.ndarray,
     output_path: Path,
-    title: str,
 ) -> None:
     _prepare_matplotlib(output_path)
     import matplotlib
 
     matplotlib.use("Agg")
+    configure_plot_style()
     import matplotlib.pyplot as plt
 
-    _configure_fonts()
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    input_map = np.asarray(inputs[0], dtype=np.float32)
-    input_tx = np.asarray(inputs[1], dtype=np.float32)
     vmin = min(float(prediction.min()), float(label.min()))
     vmax = max(float(prediction.max()), float(label.max()))
 
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
-    fig.suptitle(title)
-
-    axes[0, 0].imshow(input_map, cmap="gray", vmin=0.0, vmax=1.0)
-    axes[0, 0].set_title("Map")
-    axes[0, 0].axis("off")
-
-    axes[0, 1].imshow(input_tx, cmap="gray", vmin=0.0, vmax=1.0)
-    axes[0, 1].set_title("Tx")
-    axes[0, 1].axis("off")
-
-    pred_im = axes[1, 0].imshow(prediction, cmap="viridis", vmin=vmin, vmax=vmax)
-    axes[1, 0].set_title("Inference")
-    axes[1, 0].axis("off")
-
-    axes[1, 1].imshow(label, cmap="viridis", vmin=vmin, vmax=vmax)
-    axes[1, 1].set_title("Label")
-    axes[1, 1].axis("off")
-
-    colorbar = fig.colorbar(pred_im, ax=axes[1, :], fraction=0.046, pad=0.04)
-    colorbar.ax.set_ylabel("Normalized Power", rotation=270, labelpad=14)
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4), constrained_layout=True)
+    axes[0].imshow(prediction, cmap="viridis", vmin=vmin, vmax=vmax)
+    axes[0].set_title("Inference")
+    axes[0].axis("off")
+    axes[1].imshow(label, cmap="viridis", vmin=vmin, vmax=vmax)
+    axes[1].set_title("Label")
+    axes[1].axis("off")
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
@@ -256,13 +216,10 @@ def main() -> None:
         device=device,
     )
     metrics = compute_sample_metrics(prediction, label)
-    title = f"{args.dataset} / {args.model_type} / {sample_name}"
     save_sample_comparison_figure(
-        inputs=inputs,
         prediction=prediction,
         label=label,
         output_path=output_path,
-        title=title,
     )
 
     summary = {

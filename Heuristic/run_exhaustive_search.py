@@ -1,6 +1,6 @@
 """
 命令示例:
-python run_full_enumeration.py \
+python run_exhaustive_search.py \
   --height-map data/b.png \
   --k-max 3 \
   --coverage-target 0.9 \
@@ -8,10 +8,10 @@ python run_full_enumeration.py \
   --device mps \
   --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/Heuristic/model/RMNet.pt \
   --network-type rmnet \
-  --output-dir outputs/full_enumeration
+  --output-dir outputs/exhaustive_search
 
 算法核心思路:
-不再从全图抽样候选点，而是直接取 placement mask 上的全部合法像素。
+这个脚本不再从全图抽样候选点，而是直接取 placement mask 上的全部合法像素。
 然后按站点数 k=1..k_max 逐层枚举所有唯一站点组合，逐个调用代理模型求
 coverage、spectral_efficiency、channel_capacity_mbps 和 score。脚本会返回最早满足 coverage / spectral_efficiency 双目标
 的站点数与代表布局，同时统计每个 k 下可达到的最佳 score、coverage、spectral_efficiency。
@@ -77,7 +77,7 @@ class EnumerationResult:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Exact base-station enumeration over all legal pixels")
+    parser = argparse.ArgumentParser(description="Exact exhaustive search over all legal placement pixels")
     parser.add_argument("--height-map", required=True, type=str, help="Path to grayscale height map")
     parser.add_argument("--k-max", required=True, type=int, help="Maximum number of sites to enumerate")
     parser.add_argument("--coverage-target", required=True, type=float, help="Target coverage ratio")
@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-class FullEnumerationOptimizer:
+class ExhaustiveSearchOptimizer:
     def __init__(
         self,
         predictor: object,
@@ -323,7 +323,7 @@ def main() -> None:
         network_type=args.network_type,
         device_name=args.device,
     )
-    optimizer = FullEnumerationOptimizer(
+    optimizer = ExhaustiveSearchOptimizer(
         predictor=predictor,
         height_map=height_map,
         k_max=args.k_max,
@@ -383,6 +383,7 @@ def main() -> None:
         "noise_coefficient_db": args.noise_coefficient_db,
         "total_noise_power_dbm": core.compute_total_noise_power_dbm(args.noise_coefficient_db),
         "k_summaries": k_summaries,
+        "total_runtime_sec": time.perf_counter() - start_time,
     }
     best_metrics_path.write_text(json.dumps(best_metrics, indent=2, ensure_ascii=False), encoding="utf-8")
 

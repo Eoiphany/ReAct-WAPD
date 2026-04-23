@@ -38,6 +38,20 @@ import torch
 import torch.nn as nn
 
 
+LATIN_FONT_FAMILY = "Times New Roman"
+CHINESE_FONT_CANDIDATES = ("SimSun", "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC")
+ACADEMIC_COLOR_CYCLE = ("#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b")
+METRIC_DISPLAY_NAMES = {
+    "train_loss": "Train Loss",
+    "val_mse": "Validation MSE",
+    "val_rmse": "Validation RMSE",
+    "val_mae": "Validation MAE",
+    "val_r2": "Validation R^2",
+    "best_val_rmse": "Best Val RMSE",
+    "lr": "Learning Rate",
+}
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -96,6 +110,57 @@ def save_checkpoint(model: torch.nn.Module, checkpoint_path: Path) -> None:
     torch.save(model.state_dict(), checkpoint_path)
 
 
+def configure_plot_style() -> dict[str, str | None]:
+    import matplotlib
+    from matplotlib import font_manager
+
+    available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+    chinese_font = next((candidate for candidate in CHINESE_FONT_CANDIDATES if candidate in available_fonts), None)
+
+    font_family = [LATIN_FONT_FAMILY]
+    if chinese_font is not None:
+        font_family.append(chinese_font)
+
+    matplotlib.rcParams.update(
+        {
+            "font.family": font_family,
+            "mathtext.fontset": "stix",
+            "axes.unicode_minus": False,
+            "figure.dpi": 150,
+            "savefig.dpi": 300,
+            "legend.frameon": False,
+            "legend.fontsize": 10,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.labelsize": 11,
+            "axes.titlesize": 12,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "axes.axisbelow": True,
+            "grid.linestyle": "--",
+            "grid.linewidth": 0.6,
+            "grid.alpha": 0.25,
+            "lines.linewidth": 2.0,
+            "lines.markersize": 4.5,
+            "axes.prop_cycle": matplotlib.cycler(color=list(ACADEMIC_COLOR_CYCLE)),
+        }
+    )
+    return {"latin_font": LATIN_FONT_FAMILY, "chinese_font": chinese_font}
+
+
+def compute_regression_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
+    return {
+        "rmse": float(RMSE(pred, target).item()),
+        "mse": float(MSE(pred, target).item()),
+        "mae": float(MAE(pred, target).item()),
+        "r2": float(R2(pred, target).item()),
+    }
+
+
+def build_prefixed_metric_summary(metrics: dict[str, float], prefix: str) -> dict[str, float]:
+    return {f"{prefix}_{metric_name}": metric_value for metric_name, metric_value in metrics.items()}
+
+
 def save_training_plots(
     history: list[dict],
     output_path: Path,
@@ -115,6 +180,7 @@ def save_training_plots(
     import matplotlib
 
     matplotlib.use("Agg")
+    configure_plot_style()
     import matplotlib.pyplot as plt
 
     epochs = [row["epoch"] for row in history if "epoch" in row]
@@ -145,9 +211,10 @@ def save_training_plots(
             xs.append(row["epoch"])
             ys.append(value)
         ax.plot(xs, ys, marker="o", linewidth=1.8, markersize=3)
-        ax.set_title(key)
-        ax.set_xlabel("epoch")
-        ax.grid(True, alpha=0.3)
+        ax.set_title(METRIC_DISPLAY_NAMES.get(key, key))
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(METRIC_DISPLAY_NAMES.get(key, key))
+        ax.grid(True)
 
     for ax in axes[len(valid_metric_keys) :]:
         ax.axis("off")

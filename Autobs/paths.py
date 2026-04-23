@@ -21,11 +21,28 @@ ASSETS_DIR = PACKAGE_ROOT / "assets"
 MODELS_DIR = PACKAGE_ROOT / "models"
 CHECKPOINT_DIR = PACKAGE_ROOT / "checkpoints"
 DEFAULT_CITY_MAP_PATH = ASSETS_DIR / "USC_city_map.png"
-DEFAULT_DATASET_MAP_DIR = PROJECT_ROOT / "dataset" / "png" / "buildingsWHeight"
 DEFAULT_PMNET_SOURCE = MODELS_DIR / "PMNet.py"
 DEFAULT_PMNET_WEIGHTS = MODELS_DIR / "PMNet.pt"
 DEFAULT_RMNET_SOURCE = MODELS_DIR / "RMNet.py"
 DEFAULT_RMNET_WEIGHTS = MODELS_DIR / "RMNet.pt"
+
+
+def resolve_default_dataset_map_dir(project_root: Path) -> Path:
+    project_root = Path(project_root).resolve()
+    candidates = (
+        project_root / "dataset" / "png" / "buildingsWHeight",
+        project_root.parent / "coding" / "test" / "buildingsWHeight",
+        project_root.parent / "coding" / "test" / "dataset" / "png" / "buildingsWHeight",
+        project_root.parent / "test" / "buildingsWHeight",
+        project_root.parent / "test" / "dataset" / "png" / "buildingsWHeight",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+DEFAULT_DATASET_MAP_DIR = resolve_default_dataset_map_dir(PROJECT_ROOT)
 
 
 def ensure_runtime_dirs() -> None:

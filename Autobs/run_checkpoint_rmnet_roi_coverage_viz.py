@@ -277,7 +277,7 @@ def evaluate_checkpoint(
         if callable(stop):
             stop()
 
-    tx_loc = calc_upsampling_loc(action)
+    tx_loc = calc_upsampling_loc(action, pixel_map)
     overlay_points = overlay_points or []
     if overlay_points_from_image:
         overlay_points = extract_overlay_points_xy_from_deployment_image(

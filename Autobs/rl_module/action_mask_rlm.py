@@ -9,31 +9,36 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import gymnasium as gym
 import torch as th
 from ray.rllib.algorithms.ppo.torch.default_ppo_torch_rl_module import DefaultPPOTorchRLModule
-from ray.rllib.core.rl_module.rl_module import RLModuleConfig
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.torch_utils import FLOAT_MIN
 from ray.rllib.utils.typing import TensorStructType
 
 
 class PPOActionMaskRLM(DefaultPPOTorchRLModule):
-    def __init__(self, config: RLModuleConfig = None, observation_space=None, action_space=None, **kwargs):
-        catalog_class = kwargs.pop("catalog_class", None)
-        model_cfg = kwargs.get("model_config_dict") or kwargs.get("model_config") or {}
-        if config is not None:
-            observation_space = config.observation_space
-            action_space = config.action_space
-            model_cfg = config.model_config_dict or model_cfg
-            catalog_class = config.catalog_class or catalog_class
+    def __init__(
+        self,
+        observation_space=None,
+        action_space=None,
+        inference_only=None,
+        learner_only: bool = False,
+        model_config=None,
+        catalog_class=None,
+        **kwargs,
+    ):
+        model_cfg = kwargs.pop("model_config_dict", None) or model_config or {}
         if isinstance(observation_space, gym.spaces.Dict):
             observation_space = observation_space["observations"]
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
+            inference_only=inference_only,
+            learner_only=learner_only,
             model_config=model_cfg,
             catalog_class=catalog_class,
         )
@@ -71,12 +76,25 @@ def mask_forward_fn(forward_fn, batch, **kwargs):
     #     },
     #     ...
     # }
-    action_mask = batch[SampleBatch.OBS]["action_mask"]
-    batch[SampleBatch.OBS] = batch[SampleBatch.OBS]["observations"]
-    outputs = forward_fn(batch, **kwargs)
-    logits = outputs[SampleBatch.ACTION_DIST_INPUTS]
-    inf_mask = th.clamp(th.log(action_mask), min=FLOAT_MIN)
-    # log -> 设置下界 -> 输出+掩码下界值（仅非掩码是0）
-    outputs[SampleBatch.ACTION_DIST_INPUTS] = logits + inf_mask
-    return outputs
+    obs_batch = batch[SampleBatch.OBS]
+    action_mask = None
+    local_batch = dict(batch)
+    if isinstance(obs_batch, Mapping) and "observations" in obs_batch:
+        local_batch[SampleBatch.OBS] = obs_batch["observations"]
+        action_mask = obs_batch.get("action_mask")
 
+    outputs = forward_fn(local_batch, **kwargs)
+    logits = outputs[SampleBatch.ACTION_DIST_INPUTS]
+    logits = th.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=FLOAT_MIN)
+
+    if action_mask is not None:
+        action_mask = th.as_tensor(action_mask, dtype=logits.dtype, device=logits.device)
+        action_mask = th.nan_to_num(action_mask, nan=0.0, posinf=0.0, neginf=0.0)
+        legal_mask = action_mask > 0.0
+        has_legal_action = th.any(legal_mask, dim=-1, keepdim=True)
+        legal_mask = th.where(has_legal_action, legal_mask, th.ones_like(legal_mask, dtype=th.bool))
+        inf_mask = th.where(legal_mask, th.zeros_like(logits), th.full_like(logits, FLOAT_MIN))
+        logits = logits + inf_mask
+
+    outputs[SampleBatch.ACTION_DIST_INPUTS] = logits
+    return outputs

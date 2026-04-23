@@ -20,6 +20,11 @@ usc-data/
 /Autobs/rl_module/__init__.py
 /Autobs/test/
 /Autobs/__init__.py
+/Autobs/pretrained_policy/
+/Autobs/pretrained_policy_val/
+/Autobs/checkpoints_score_v2_pretrained/
+/Autobs/checkpoints_zonghe/
+/Autobs/checkpoints_score/
 
 /dataset/
 
@@ -50,3 +55,6 @@ usc-data/
 /surrogate/blender_scene/paris/README.md
 /surrogate/checkpoints/
 /surrogate/test/
+/surrogate/output_pred/
+/surrogate/runs/
+/surrogate/vis/

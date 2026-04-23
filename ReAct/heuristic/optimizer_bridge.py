@@ -34,8 +34,15 @@ SCRIPT_MAP = {
     "heuristic_sa": "run_sa.py",
     "heuristic_ga": "run_ga.py",
     "heuristic_pso": "run_pso.py",
-    "heuristic_bruteforce": "run_bruteforce.py",
-    "heuristic_full_enum": "run_full_enumeration.py",
+    "heuristic_candidate_enum": "run_candidate_enumeration.py",
+    "heuristic_exhaustive": "run_exhaustive_search.py",
+    "heuristic_bruteforce": "run_candidate_enumeration.py",
+    "heuristic_full_enum": "run_exhaustive_search.py",
+}
+
+PLANNER_ALIASES = {
+    "heuristic_bruteforce": "heuristic_candidate_enum",
+    "heuristic_full_enum": "heuristic_exhaustive",
 }
 
 
@@ -72,6 +79,7 @@ def solve_target_layout(
     candidate_limit: int = 500,
     device: str = "mps",
 ) -> tuple[list[tuple[int, int]], dict]:
+    planner_name = PLANNER_ALIASES.get(planner_name, planner_name)
     script_name = SCRIPT_MAP.get(planner_name)
     if script_name is None:
         raise ValueError(f"Unsupported heuristic planner: {planner_name}")
@@ -107,9 +115,9 @@ def solve_target_layout(
         "--device",
         device,
     ]
-    if planner_name != "heuristic_full_enum":
+    if planner_name != "heuristic_exhaustive":
         cmd.extend(["--max-evals", str(max_evals)])
-    if planner_name in {"heuristic_greedy", "heuristic", "heuristic_bruteforce"}:
+    if planner_name in {"heuristic_greedy", "heuristic", "heuristic_candidate_enum"}:
         cmd.extend(["--candidate-stride", str(candidate_stride), "--candidate-limit", str(candidate_limit)])
 
     subprocess.run(cmd, check=True)

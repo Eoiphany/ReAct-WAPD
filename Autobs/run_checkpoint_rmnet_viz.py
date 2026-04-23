@@ -10,7 +10,7 @@ python -m Autobs.run_checkpoint_rmnet_viz \
 用途:
 - 对单张灰度高度图构造 PPO checkpoint 所需 observation。
 - 使用 checkpoint 选一个动作（单站点部署位置）。
-- 使用 RMNet 作为代理模型预测 radiomap，并计算 coverage / spectral efficiency / score。
+- 使用 surrogate 模型（PMNet / RMNet）预测 radiomap，并计算 coverage / spectral efficiency / score。
 - 输出可视化 PNG 和 JSON 摘要。
 
 实现说明:
@@ -18,7 +18,7 @@ python -m Autobs.run_checkpoint_rmnet_viz \
 - 可视化中的 `Action Mask` 面板不是原始 `32 x 32` 小图，而是把该网格按图像尺寸放大成256后的显示结果，即每个方格都是256/32=8*8的方格；紫色块表示 `mask=0` 的非法动作，亮色块表示 `mask=1` 的合法动作，白色 `x` 仅用于标记 checkpoint 最终选中的 action 对应位置，并不表示额外的第三种 mask 取值。
 
 输出示例:
-- `*_checkpoint_rmnet_viz.png`: 输入图、放大的 action mask、RMNet pathgain 热力图与 coverage 面板。
+- `*_checkpoint_rmnet_viz.png`: 输入图、放大的 action mask、surrogate pathgain 热力图与 coverage 面板。
 - `*_checkpoint_rmnet_summary.json`: 记录 `action id`、像素坐标 `(tx_row, tx_col)` 与各项指标。
 """
 
@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import pickle
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -42,18 +43,32 @@ from Autobs.env.utils import (
 )
 from Autobs.paths import CHECKPOINT_DIR, DEFAULT_RMNET_WEIGHTS, PACKAGE_ROOT
 
+os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
+
 
 DEFAULT_OUTPUT_DIR = PACKAGE_ROOT / "outputs" / "checkpoint_viz"
 LATIN_FONT_FAMILY = "Times New Roman"
 CHINESE_FONT_CANDIDATES = ["SimSun", "Songti SC"]
+MODULE_OBS_KEY = "obs"
+MODULE_ACTIONS_KEY = "actions"
+MODULE_ACTION_DIST_INPUTS_KEY = "action_dist_inputs"
+
+
+class CheckpointInferenceCompatibilityError(RuntimeError):
+    """Raised when an agent cannot be used through the RLModule inference path."""
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run one PPO checkpoint on one image and visualize RMNet output")
+    parser = argparse.ArgumentParser(description="Run one PPO checkpoint on one image and visualize surrogate output")
     parser.add_argument("--image", required=True, type=str, help="Input grayscale height map")
     parser.add_argument("--checkpoint", default=str(CHECKPOINT_DIR), type=str, help="RLlib checkpoint directory")
-    parser.add_argument("--model-path", default=str(DEFAULT_RMNET_WEIGHTS), type=str, help="RMNet weights path")
-    parser.add_argument("--network-type", default="rmnet", choices=["rmnet", "rmnet_v3"], help="RMNet variant")
+    parser.add_argument("--model-path", default=str(DEFAULT_RMNET_WEIGHTS), type=str, help="Surrogate weights path")
+    parser.add_argument(
+        "--network-type",
+        default="rmnet",
+        choices=["pmnet", "pmnet_v3", "rmnet", "rmnet_v3"],
+        help="Surrogate variant",
+    )
     parser.add_argument("--device", default="auto", type=str, help="Inference device: auto/cpu/cuda/mps")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), type=str, help="Directory for PNG/JSON outputs")
     parser.add_argument("--explore", action="store_true", help="Use exploratory sampling instead of deterministic action")
@@ -87,6 +102,24 @@ def extract_action(action_result: Any) -> int:
 
 
 def init_model(network_type: str):
+    if network_type == "pmnet":
+        from Autobs.models.PMNet import PMNet
+
+        return PMNet(
+            n_blocks=[3, 3, 27, 3],
+            atrous_rates=[6, 12, 18],
+            multi_grids=[1, 2, 4],
+            output_stride=16,
+        )
+    if network_type == "pmnet_v3":
+        from Autobs.models.PMNet import PMNet
+
+        return PMNet(
+            n_blocks=[3, 3, 27, 3],
+            atrous_rates=[6, 12, 18],
+            multi_grids=[1, 2, 4],
+            output_stride=8,
+        )
     if network_type == "rmnet":
         from Autobs.models.RMNet import RMNet
 
@@ -105,7 +138,7 @@ def init_model(network_type: str):
             multi_grids=[1, 2, 4],
             output_stride=8,
         )
-    raise ValueError(f"Unsupported network type: {network_type}")
+    raise ValueError(f"Unsupported surrogate type: {network_type}")
 
 
 def infer_checkpoint_family(state: dict[str, Any] | Any) -> str | None:
@@ -169,19 +202,110 @@ class RMNetPredictor:
         tensor = numpy_image_to_tensor(inputs).unsqueeze(0).to(self.device)
         with torch.no_grad():
             pred = self.model(tensor)
-        return torch.clamp(pred, 0.0, 1.0).detach().cpu().squeeze().numpy().astype(np.float32)
+            pred = torch.nan_to_num(pred, nan=0.0, posinf=1.0, neginf=0.0)
+            pred = torch.clamp(pred, 0.0, 1.0)
+        return pred.detach().cpu().squeeze().numpy().astype(np.float32)
 
 
 def load_checkpoint_agent(checkpoint_path: str | Path):
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     try:
         from ray.rllib.algorithms.algorithm import Algorithm
+        from ray.util.annotations import RayDeprecationWarning
     except ModuleNotFoundError:
         return load_numpy_checkpoint_policy(checkpoint_path)
-    return Algorithm.from_checkpoint(str(checkpoint_path))
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            warnings.filterwarnings("ignore", category=RayDeprecationWarning)
+            return Algorithm.from_checkpoint(str(checkpoint_path))
+    except AttributeError as exc:
+        if "to_dict" not in str(exc):
+            raise
+        return load_numpy_checkpoint_policy(checkpoint_path)
+
+
+def _extract_batched_action(action_value: Any) -> int:
+    if hasattr(action_value, "detach"):
+        action_value = action_value.detach()
+    if hasattr(action_value, "cpu"):
+        action_value = action_value.cpu()
+    return int(np.asarray(action_value).reshape(-1)[0].item())
+
+
+def _get_module_device(module: Any) -> Any:
+    parameters = getattr(module, "parameters", None)
+    if not callable(parameters):
+        return None
+    try:
+        first_param = next(parameters())
+    except (StopIteration, TypeError):
+        return None
+    return getattr(first_param, "device", None)
+
+
+def _as_batched_module_obs(value: Any, torch_module, device: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _as_batched_module_obs(item, torch_module, device) for key, item in value.items()}
+    tensor = torch_module.as_tensor(np.asarray(value), dtype=torch_module.float32, device=device)
+    if tensor.ndim == 0:
+        tensor = tensor.reshape(1)
+    return tensor.unsqueeze(0)
+
+
+def _compute_checkpoint_action_via_rl_module(agent: Any, observation: dict[str, np.ndarray], explore: bool) -> int:
+    get_module = getattr(agent, "get_module", None)
+    if not callable(get_module):
+        raise CheckpointInferenceCompatibilityError("Agent does not expose get_module()")
+
+    try:
+        module = get_module()
+    except AttributeError as exc:
+        raise CheckpointInferenceCompatibilityError(str(exc)) from exc
+    if module is None:
+        raise CheckpointInferenceCompatibilityError("Algorithm.get_module() returned None")
+
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise CheckpointInferenceCompatibilityError("torch is required for RLModule inference") from exc
+
+    forward = getattr(module, "forward_exploration" if explore else "forward_inference", None)
+    if not callable(forward):
+        raise CheckpointInferenceCompatibilityError("RLModule does not expose the expected forward method")
+
+    device = _get_module_device(module)
+    batch = {MODULE_OBS_KEY: _as_batched_module_obs(observation, torch, device)}
+    with torch.no_grad():
+        outputs = forward(batch)
+
+    if MODULE_ACTIONS_KEY in outputs:
+        return _extract_batched_action(outputs[MODULE_ACTIONS_KEY])
+
+    if MODULE_ACTION_DIST_INPUTS_KEY not in outputs:
+        raise CheckpointInferenceCompatibilityError("RLModule output does not contain actions or action_dist_inputs")
+
+    dist_cls_getter = getattr(
+        module,
+        "get_exploration_action_dist_cls" if explore else "get_inference_action_dist_cls",
+        None,
+    )
+    if not callable(dist_cls_getter):
+        raise CheckpointInferenceCompatibilityError("RLModule does not expose an action distribution class")
+
+    action_dist = dist_cls_getter().from_logits(outputs[MODULE_ACTION_DIST_INPUTS_KEY])
+    if not explore and hasattr(action_dist, "to_deterministic"):
+        action_dist = action_dist.to_deterministic()
+    return _extract_batched_action(action_dist.sample())
 
 
 def compute_checkpoint_action(agent, observation: dict[str, np.ndarray], explore: bool) -> int:
+    if hasattr(agent, "get_module"):
+        try:
+            return _compute_checkpoint_action_via_rl_module(agent, observation, explore)
+        except CheckpointInferenceCompatibilityError:
+            pass
     action_result = agent.compute_single_action(observation=observation, explore=explore)
     return extract_action(action_result)
 
@@ -246,10 +370,20 @@ def load_numpy_checkpoint_policy(checkpoint_path: str | Path) -> NumpyCheckpoint
     if not module_state_path.exists():
         raise FileNotFoundError(f"Fallback module_state not found: {module_state_path}")
     with module_state_path.open("rb") as handle:
-        state = pickle.load(handle)
+        state = load_pickle_state(handle)
     if not isinstance(state, dict):
         raise TypeError(f"Unsupported checkpoint state type: {type(state)!r}")
     return NumpyCheckpointPolicy(state)
+
+
+def load_pickle_state(handle):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*numpy\.core\.numeric is deprecated.*",
+            category=DeprecationWarning,
+        )
+        return pickle.load(handle)
 
 
 def action_mask_grid(action_mask: np.ndarray) -> np.ndarray:
@@ -360,7 +494,7 @@ def evaluate_checkpoint(
         if callable(stop):
             stop()
 
-    tx_loc = calc_upsampling_loc(action)
+    tx_loc = calc_upsampling_loc(action, pixel_map)
     pathgain_db, metrics = get_stats(pixel_map, [tx_loc], pmnet=predictor)
 
     stem = image_path.stem

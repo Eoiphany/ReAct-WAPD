@@ -20,16 +20,20 @@ from gymnasium.spaces import Box, Dict, Discrete
 
 from Autobs.env.utils import (
     ACTION_SPACE_SIZE,
+    DEFAULT_COVERAGE_TARGET,
+    DEFAULT_SPECTRAL_EFFICIENCY_TARGET,
     MAP_SIZE,
     calc_action_mask,
     calc_upsampling_loc,
     get_stats,
+    load_heuristic_targets,
     load_map_normalized,
+    lookup_heuristic_targets,
     resolve_city_map_paths,
     select_reward,
 )
 from Autobs.paths import DEFAULT_CITY_MAP_PATH, DEFAULT_DATASET_MAP_DIR
-from Autobs.pmnet_adapter import infer_pmnet
+from Autobs.pmnet_adapter import infer_surrogate
 
 # BaseEnvironment继承自gym.Env，必须实现至少两个核心函数：
 # reset()
@@ -45,6 +49,13 @@ class BaseEnvironment(gym.Env):
         self.dataset_limit = config.get("dataset_limit")
         self.dataset_offset = int(config.get("dataset_offset", 0))
         self.dataset_stride = int(config.get("dataset_stride", 1))
+        self.heuristic_targets_path = config.get("heuristic_targets_path")
+        self.model_path = config.get("model_path")
+        self.network_type = config.get("network_type", "pmnet")
+        self.default_coverage_target = float(config.get("coverage_target", DEFAULT_COVERAGE_TARGET))
+        self.default_spectral_efficiency_target = float(
+            config.get("spectral_efficiency_target", DEFAULT_SPECTRAL_EFFICIENCY_TARGET)
+        )
         # Autobs/config.yaml 中传入的是256 所以裁剪的功能相当于没有，实际上还学的是整图决策
         self.crop_size = config.get("crop_size", 512)
         self.stride = config.get("stride", 100)
@@ -71,6 +82,7 @@ class BaseEnvironment(gym.Env):
         self._current_map_path = None
         self._city_map = None
         self._pixel_map = None
+        self._heuristic_targets = load_heuristic_targets(self.heuristic_targets_path)
         self._tx_locs = []
         self._steps = 0
 
@@ -119,11 +131,21 @@ class BaseEnvironment(gym.Env):
         self, action: ActType
     ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         self._steps += 1
-        self._tx_locs.append(calc_upsampling_loc(int(action)))
+        self._tx_locs.append(calc_upsampling_loc(int(action), self._pixel_map))
+        coverage_target, spectral_efficiency_target = lookup_heuristic_targets(
+            self._heuristic_targets,
+            self._current_map_path,
+            self.default_coverage_target,
+            self.default_spectral_efficiency_target,
+        )
 
         # evaluate
         _pathgain_db, metrics = get_stats(
-            self._pixel_map, self._tx_locs, pmnet=infer_pmnet
+            self._pixel_map,
+            self._tx_locs,
+            pmnet=lambda inputs: infer_surrogate(inputs, model_path=self.model_path, network_type=self.network_type),
+            coverage_target=coverage_target,
+            spectral_efficiency_target=spectral_efficiency_target,
         )
         reward = select_reward(metrics, self.reward_type)
         # 注意只是把obs整合成一维的了，_pixel_map没有动，reshape是保存副本
@@ -133,8 +155,9 @@ class BaseEnvironment(gym.Env):
             "accumulated_reward": reward,
             "n_bs": 1,
             "steps": self._steps,
+            "coverage_target": coverage_target,
+            "spectral_efficiency_target": spectral_efficiency_target,
             **metrics,
         }
         # 下一时刻obs，奖励，terminated正常结束，truncated外部中断，附加信息字典
         return {"observations": obs, "action_mask": mask}, reward, True, False, info
-

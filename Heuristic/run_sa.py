@@ -248,7 +248,7 @@ def predict(
 
 
 def build_placement_mask(height_map: np.ndarray) -> np.ndarray:
-    return np.ones_like(height_map, dtype=bool)
+    return np.asarray(height_map > 0, dtype=bool)
 
 
 def build_roi_mask(height_map: np.ndarray) -> np.ndarray:

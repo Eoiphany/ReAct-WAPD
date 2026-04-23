@@ -110,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
             "heuristic_sa",
             "heuristic_ga",
             "heuristic_pso",
+            "heuristic_candidate_enum",
+            "heuristic_exhaustive",
             "heuristic_bruteforce",
             "heuristic_full_enum",
             "random",

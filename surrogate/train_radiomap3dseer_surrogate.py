@@ -5,11 +5,6 @@
 
 示例命令:
   训练 PMNet:
-    python surrogate/train_radiomap3dseer_surrogate.py \
-      --model-type pmnet \
-      --data-root /path/to/RadioMap3DSeer \
-      --output-root surrogate/runs
-
     python autodl-tmp/surrogate/train_radiomap3dseer_surrogate.py \
       --model-type pmnet \
       --data-root autodl-tmp/dataset/ \
@@ -18,27 +13,28 @@
   训练 RMNet:
     python surrogate/train_radiomap3dseer_surrogate.py \
       --model-type rmnet \
-      --data-root /path/to/RadioMap3DSeer \
+      --data-root autodl-tmp/dataset/ \
       --output-root surrogate/runs
   训练 U-Net:
     python surrogate/train_radiomap3dseer_surrogate.py \
       --model-type unet \
-      --data-root /path/to/RadioMap3DSeer \
+      --data-root autodl-tmp/dataset/ \
       --output-root surrogate/runs
   训练 TransUNet:
     python surrogate/train_radiomap3dseer_surrogate.py \
       --model-type transunet \
-      --data-root /path/to/RadioMap3DSeer \
+      --data-root autodl-tmp/dataset/ \
       --output-root surrogate/runs
   训练 RadioUNet:
     python surrogate/train_radiomap3dseer_surrogate.py \
       --model-type radiounet \
-      --data-root /path/to/RadioMap3DSeer \
+      --data-root autodl-tmp/dataset/ \
       --output-root surrogate/runs
+      
   只评估已有权重:
     python surrogate/train_radiomap3dseer_surrogate.py \
       --model-type rmnet \
-      --data-root /path/to/RadioMap3DSeer \
+      --data-root autodl-tmp/dataset/ \
       --checkpoint surrogate/checkpoints/rmnet_radiomap3dseer.pt \
       --csv-file /path/to/eval_pairs.csv \
       --eval-only
@@ -84,11 +80,27 @@ from tqdm import tqdm
 try:
     from .data_surrogate import RadioMap3DSeerDataset, resolve_radiomap_sample_pairs
     from .model_registry import ALL_MODEL_TYPES, build_model, select_prediction
-    from .utils import MAE, MSE, R2, RMSE, get_device, load_checkpoint, save_checkpoint, save_training_plots, set_seed
+    from .utils import (
+        build_prefixed_metric_summary,
+        compute_regression_metrics,
+        get_device,
+        load_checkpoint,
+        save_checkpoint,
+        save_training_plots,
+        set_seed,
+    )
 except ImportError:
     from data_surrogate import RadioMap3DSeerDataset, resolve_radiomap_sample_pairs
     from model_registry import ALL_MODEL_TYPES, build_model, select_prediction
-    from utils import MAE, MSE, R2, RMSE, get_device, load_checkpoint, save_checkpoint, save_training_plots, set_seed
+    from utils import (
+        build_prefixed_metric_summary,
+        compute_regression_metrics,
+        get_device,
+        load_checkpoint,
+        save_checkpoint,
+        save_training_plots,
+        set_seed,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -167,7 +179,7 @@ def prepare_run_dir(cfg: RadioMapTrainConfig) -> Path:
 
 def save_history_csv(history: list[dict], output_path: Path) -> None:
     # 定义 CSV 列名顺序
-    fieldnames = ["epoch", "train_loss", "val_rmse", "val_mae", "val_r2", "best_val_rmse", "lr"]
+    fieldnames = ["epoch", "train_loss", "val_mse", "val_rmse", "val_mae", "val_r2", "best_val_rmse", "lr"]
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         # 构造基于字典的 CSV 写入器
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -178,12 +190,10 @@ def save_history_csv(history: list[dict], output_path: Path) -> None:
             writer.writerow(row)
 
 
-def evaluate(model, loader, device) -> tuple[float, float, float]:
+def evaluate(model, loader, device) -> tuple[dict[str, float], int]:
     # 关闭 Dropout、使用 BatchNorm
     model.eval()
-    total_rmse = 0.0
-    total_mae = 0.0
-    total_r2 = 0.0
+    totals = {"rmse": 0.0, "mse": 0.0, "mae": 0.0, "r2": 0.0}
     total_samples = 0
     # 关闭梯度计算，减少显存占用并提升推理效率
     with torch.no_grad():
@@ -193,13 +203,14 @@ def evaluate(model, loader, device) -> tuple[float, float, float]:
             targets = targets.to(device)
             # torch.clamp 限制输出范围在 [0,1]
             preds = torch.clamp(select_prediction(model(inputs)), 0, 1)
-            # inputs.size(0) == batch_size 各个指标返回的都是整个这批样本的均值
-            total_rmse += RMSE(preds, targets).item() * inputs.size(0)
-            total_mae += MAE(preds, targets).item() * inputs.size(0)
-            total_r2 += R2(preds, targets).item() * inputs.size(0)
-            total_samples += inputs.size(0)
+            batch_metrics = compute_regression_metrics(preds, targets)
+            batch_size = inputs.size(0)
+            for metric_name, metric_value in batch_metrics.items():
+                totals[metric_name] += metric_value * batch_size
+            total_samples += batch_size
     denom = max(total_samples, 1)
-    return total_rmse / denom, total_mae / denom, total_r2 / denom
+    metrics = {metric_name: metric_total / denom for metric_name, metric_total in totals.items()}
+    return metrics, total_samples
 
 
 def build_eval_loader(cfg: RadioMapTrainConfig) -> DataLoader:
@@ -286,15 +297,14 @@ def main() -> None:
         if not cfg.checkpoint:
             raise ValueError("--eval-only requires --checkpoint")
         eval_loader = build_eval_loader(cfg)
-        eval_rmse, eval_mae, eval_r2 = evaluate(model, eval_loader, device)
+        eval_metrics, eval_sample_count = evaluate(model, eval_loader, device)
         summary = {
             "dataset": "radiomap3dseer",
             "model_type": cfg.model_type,
             "checkpoint": cfg.checkpoint,
-            "eval_rmse": eval_rmse,
-            "eval_mae": eval_mae,
-            "eval_r2": eval_r2,
+            "eval_sample_count": eval_sample_count,
         }
+        summary.update(build_prefixed_metric_summary(eval_metrics, prefix="eval"))
         with (run_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2)
         print(json.dumps(summary, indent=2))
@@ -305,6 +315,7 @@ def main() -> None:
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=cfg.step, gamma=cfg.lr_decay)
 
     best_val_rmse = float("inf")
+    best_val_metrics: dict[str, float] | None = None
     best_checkpoint_path = run_dir / f"{cfg.model_type}_radiomap3dseer_best.pt"
     history: list[dict] = []
     global_step = 0
@@ -343,22 +354,22 @@ def main() -> None:
             current_lr = optimizer.param_groups[0]["lr"]
             scheduler.step()
 
-            val_rmse = None
-            val_mae = None
-            val_r2 = None
+            val_metrics = None
             if epoch % cfg.val_freq == 0:
-                val_rmse, val_mae, val_r2 = evaluate(model, val_loader, device)
-                if val_rmse < best_val_rmse:
-                    best_val_rmse = val_rmse
+                val_metrics, _ = evaluate(model, val_loader, device)
+                if val_metrics["rmse"] < best_val_rmse:
+                    best_val_rmse = val_metrics["rmse"]
+                    best_val_metrics = dict(val_metrics)
                     save_checkpoint(model, best_checkpoint_path)
 
             history.append(
                 {
                     "epoch": epoch + 1,
                     "train_loss": train_loss,
-                    "val_rmse": val_rmse,
-                    "val_mae": val_mae,
-                    "val_r2": val_r2,
+                    "val_mse": None if val_metrics is None else val_metrics["mse"],
+                    "val_rmse": None if val_metrics is None else val_metrics["rmse"],
+                    "val_mae": None if val_metrics is None else val_metrics["mae"],
+                    "val_r2": None if val_metrics is None else val_metrics["r2"],
                     "best_val_rmse": None if best_val_rmse == float("inf") else best_val_rmse,
                     "lr": current_lr,
                 }
@@ -370,24 +381,25 @@ def main() -> None:
                 history=history,
                 output_path=run_dir / "training_curves.png",
                 title=f"RadioMap3DSeer / {cfg.model_type}",
-                metric_keys=("train_loss", "val_rmse", "val_mae", "val_r2", "best_val_rmse", "lr"),
+                metric_keys=("train_loss", "val_mse", "val_rmse", "val_mae", "val_r2", "best_val_rmse", "lr"),
             )
 
     best_model = build_model(cfg.model_type, output_stride=cfg.output_stride, in_channels=2)
     load_checkpoint(best_model, str(best_checkpoint_path), strict=True)
     best_model = best_model.to(device)
-    test_rmse, test_mae, test_r2 = evaluate(best_model, test_loader, device)
+    test_metrics, test_sample_count = evaluate(best_model, test_loader, device)
 
     summary = {
         "dataset": "radiomap3dseer",
         "model_type": cfg.model_type,
         "training_mode": "from_scratch",
         "best_val_rmse": best_val_rmse,
-        "test_rmse": test_rmse,
-        "test_mae": test_mae,
-        "test_r2": test_r2,
+        "test_sample_count": test_sample_count,
         "best_checkpoint": str(best_checkpoint_path),
     }
+    if best_val_metrics is not None:
+        summary.update(build_prefixed_metric_summary(best_val_metrics, prefix="best_val"))
+    summary.update(build_prefixed_metric_summary(test_metrics, prefix="test"))
     with (run_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
     print(json.dumps(summary, indent=2))

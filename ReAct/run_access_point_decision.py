@@ -46,7 +46,7 @@ python autodl-tmp/code/ReAct/run_access_point_decision.py \
   --city-map-path: 输入建筑高度图路径。
   --user-request: 直接传入自然语言需求。
   --user-request-path: 从文本文件读取自然语言需求；优先级高于 --user-request。
-  --planner: 决策器类型，heuristic、heuristic_greedy、heuristic_sa、heuristic_ga、heuristic_pso、heuristic_bruteforce、heuristic_full_enum、random、openai、qwen、llamafactory。
+  --planner: 决策器类型，heuristic、heuristic_greedy、heuristic_sa、heuristic_ga、heuristic_pso、heuristic_candidate_enum、heuristic_exhaustive、random、openai、qwen、llamafactory。
   --prompt-path: prompt 配置 JSON 路径。
   --prompt-key: prompt JSON 中的键名；当 --llm-decision-mode=explain_weighted 且沿用默认值时，会自动切到 explain_weighted prompt。
   --traj-dir: 轨迹输出目录。
@@ -57,8 +57,8 @@ python autodl-tmp/code/ReAct/run_access_point_decision.py \
   --llm-top-k-candidates: 给 OpenAI 压缩 observation 时保留的候选点数量。
   --llm-decision-mode: LLM 决策模式，decide 为直接输出动作，explain_weighted 为输出解释+权重后由程序选动作。
   --heuristic-max-evals: 外部启发式优化脚本允许的最大评估次数。
-  --heuristic-candidate-stride: 候选站点采样步长，供 greedy / bruteforce 使用。
-  --heuristic-candidate-limit: 候选站点上限，供 greedy / bruteforce 使用。
+  --heuristic-candidate-stride: 候选站点采样步长，供 greedy / candidate_enum 使用。
+  --heuristic-candidate-limit: 候选站点上限，供 greedy / candidate_enum 使用。
   --eval-model: 评估模型，pmnet、rmnet 或 proxy。
   --eval-device: PMNet/RMNet 与 heuristic 外部脚本推理设备，auto/cpu/cuda/mps。
   --init-mode: 初始站点模式，none、random、greedy、ppo。
@@ -289,6 +289,8 @@ def build_parser() -> argparse.ArgumentParser:
             "heuristic_sa",
             "heuristic_ga",
             "heuristic_pso",
+            "heuristic_candidate_enum",
+            "heuristic_exhaustive",
             "heuristic_bruteforce",
             "heuristic_full_enum",
             "random",

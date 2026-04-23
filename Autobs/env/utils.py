@@ -10,13 +10,15 @@
 - `--dataset_limit`: 限制参与训练的地图数量。
 - `--dataset_offset`: 设定数据集子集起始偏移。
 - `--dataset_stride`: 设定数据集抽样步长。
-- `-r, --reward_type`: 可选 `coverage`、`spectral_efficiency`、`score`，其中 `capacity` 兼容映射到 `spectral_efficiency`。
+- `-r, --reward_type`: 可选 `coverage`、`spectral_efficiency`、`score`、`score_v2`，其中 `capacity`
+  兼容映射到 `spectral_efficiency`。
 - 本文件只保留 PPO 训练环境真正使用的地图读取、数据集子集选择、动作掩码、与 `Heuristic/run_sa.py` 对齐的指标计算。
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +26,7 @@ from PIL import Image
 import yaml
 
 from Autobs.paths import CONFIG_PATH
-from Autobs.pmnet_adapter import infer_pmnet
+from Autobs.pmnet_adapter import infer_surrogate
 
 
 def _load_env_config() -> dict:
@@ -40,8 +42,6 @@ UPSAMPLING_FACTOR = MAP_SIZE // ACTION_SPACE_SIZE
 NON_BUILDING_PIXEL = float(ENV_CONFIG.get("non_building_pixel", 1.0))
 ROI_THRESHOLD = float(ENV_CONFIG.get("roi_threshold", 0.01))
 ROI_IS_BLACK = bool(ENV_CONFIG.get("roi_is_black", True))
-TX_THRESHOLD = float(ENV_CONFIG.get("tx_threshold", ROI_THRESHOLD))
-TX_IS_BLACK = bool(ENV_CONFIG.get("tx_is_black", ROI_IS_BLACK))
 TX_POWER_DBM = float(ENV_CONFIG.get("tx_power_dbm", 23.0))
 PATHLOSS_THRESHOLD_DB = float(ENV_CONFIG.get("pathloss_threshold_db", 140.0))
 DB_MIN = float(ENV_CONFIG.get("pathgain_db_min", -162.0))
@@ -55,6 +55,17 @@ DEFAULT_W1 = float(ENV_CONFIG.get("w1", 1.0))
 DEFAULT_W2 = float(ENV_CONFIG.get("w2", 1.0))
 THERMAL_NOISE_DENSITY_DBM_PER_HZ = -174.0
 DEFAULT_NOISE_COEFFICIENT_DB = float(ENV_CONFIG.get("noise_coefficient_db", 10.0))
+DEFAULT_SCORE_V2_COVERAGE_FLOOR_OFFSET = float(ENV_CONFIG.get("score_v2_coverage_floor_offset", 0.08))
+DEFAULT_SCORE_V2_COVERAGE_FLOOR_MIN = float(ENV_CONFIG.get("score_v2_coverage_floor_min", 0.55))
+DEFAULT_SCORE_V2_COVERAGE_FLOOR_MAX = float(ENV_CONFIG.get("score_v2_coverage_floor_max", 0.75))
+DEFAULT_SCORE_V2_GATE_WIDTH = float(ENV_CONFIG.get("score_v2_gate_width", 0.02))
+DEFAULT_SCORE_V2_SE_FLOOR = float(ENV_CONFIG.get("score_v2_se_floor", 0.35))
+DEFAULT_SCORE_V2_MARGIN_SCALE_DB = float(ENV_CONFIG.get("score_v2_margin_scale_db", 6.0))
+DEFAULT_SCORE_V2_COVERAGE_WEIGHT = float(ENV_CONFIG.get("score_v2_coverage_weight", 0.5))
+DEFAULT_SCORE_V2_MARGIN_WEIGHT = float(ENV_CONFIG.get("score_v2_margin_weight", 1.0))
+DEFAULT_SCORE_V2_SE_WEIGHT = float(ENV_CONFIG.get("score_v2_se_weight", 2.0))
+DEFAULT_SCORE_V2_COVERAGE_PENALTY_WEIGHT = float(ENV_CONFIG.get("score_v2_coverage_penalty_weight", 8.0))
+DEFAULT_SCORE_V2_SE_PENALTY_WEIGHT = float(ENV_CONFIG.get("score_v2_se_penalty_weight", 1.5))
 
 
 def dbm_to_mw(dbm):
@@ -129,22 +140,49 @@ def resolve_city_map_paths(
 def _roi_mask(pixel_map: np.ndarray) -> np.ndarray:
     return pixel_map <= ROI_THRESHOLD if ROI_IS_BLACK else pixel_map >= ROI_THRESHOLD
 
-
-def _tx_mask(pixel_map: np.ndarray) -> np.ndarray:
-    return pixel_map <= TX_THRESHOLD if TX_IS_BLACK else pixel_map >= TX_THRESHOLD
+# 按 block 内是否存在合法像素判定合法。
+def _action_block_bounds(pixel_map: np.ndarray, row_r: int, col_r: int) -> tuple[int, int, int, int]:
+    height, width = pixel_map.shape
+    row_step = max(height // ACTION_SPACE_SIZE, 1)
+    col_step = max(width // ACTION_SPACE_SIZE, 1)
+    row0 = row_r * row_step
+    row1 = min((row_r + 1) * row_step, height)
+    col0 = col_r * col_step
+    col1 = min((col_r + 1) * col_step, width)
+    return row0, row1, col0, col1
 
 
 def calc_action_mask(pixel_map: np.ndarray) -> np.ndarray:
-    upsampling_factor = pixel_map.shape[0] // ACTION_SPACE_SIZE
-    idx = np.arange((upsampling_factor - 1) // 2, pixel_map.shape[0], upsampling_factor)
-    action_pixels = np.where(_tx_mask(pixel_map)[idx][:, idx], 1.0, 0.0)
-    return action_pixels.reshape(-1).astype(np.float32)
+    mask = np.zeros((ACTION_SPACE_SIZE, ACTION_SPACE_SIZE), dtype=np.float32)
+    for row_r in range(ACTION_SPACE_SIZE):
+        for col_r in range(ACTION_SPACE_SIZE):
+            row0, row1, col0, col1 = _action_block_bounds(pixel_map, row_r, col_r)
+            block = pixel_map[row0:row1, col0:col1]
+            mask[row_r, col_r] = 1.0 if np.any(block > 0.0) else 0.0
+    return mask.reshape(-1).astype(np.float32)
 
-
-def calc_upsampling_loc(action: int) -> tuple[int, int]:
+# 返回 block 内最近中心的合法像素，不再固定回 block 中心
+def calc_upsampling_loc(action: int, pixel_map: np.ndarray | None = None) -> tuple[int, int]:
     row_r, col_r = divmod(action, ACTION_SPACE_SIZE)
-    row = row_r * UPSAMPLING_FACTOR + (UPSAMPLING_FACTOR - 1) // 2
-    col = col_r * UPSAMPLING_FACTOR + (UPSAMPLING_FACTOR - 1) // 2
+    if pixel_map is None:
+        row = row_r * UPSAMPLING_FACTOR + (UPSAMPLING_FACTOR - 1) // 2
+        col = col_r * UPSAMPLING_FACTOR + (UPSAMPLING_FACTOR - 1) // 2
+        return int(row), int(col)
+
+    row0, row1, col0, col1 = _action_block_bounds(pixel_map, row_r, col_r)
+    block = pixel_map[row0:row1, col0:col1] > 0.0
+    ys, xs = np.where(block)
+    if len(xs) == 0:
+        row = row0 + max((row1 - row0 - 1) // 2, 0)
+        col = col0 + max((col1 - col0 - 1) // 2, 0)
+        return int(row), int(col)
+
+    center_y = (row1 - row0 - 1) / 2.0
+    center_x = (col1 - col0 - 1) / 2.0
+    distances = (ys.astype(np.float32) - center_y) ** 2 + (xs.astype(np.float32) - center_x) ** 2
+    best_idx = int(np.argmin(distances))
+    row = row0 + int(ys[best_idx])
+    col = col0 + int(xs[best_idx])
     return int(row), int(col)
 
 
@@ -157,13 +195,14 @@ def build_tx_layer(pixel_map: np.ndarray, tx_locs: list[tuple[int, int]]) -> np.
 
 
 def normalized_to_pathgain_db(array: np.ndarray) -> np.ndarray:
-    array = np.clip(np.asarray(array, dtype=np.float32), 0.0, 1.0)
+    array = np.nan_to_num(np.asarray(array, dtype=np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    array = np.clip(array, 0.0, 1.0)
     return array * (DB_MAX - DB_MIN) + DB_MIN
 
 
 def get_powermap(pixel_map: np.ndarray, tx_layer: np.ndarray, pmnet=None) -> np.ndarray:
     inputs = np.stack([pixel_map, tx_layer], axis=2)
-    predictor = pmnet or infer_pmnet
+    predictor = pmnet or infer_surrogate
     pathgain_db = normalized_to_pathgain_db(predictor(inputs))
     pathgain_db[~_roi_mask(pixel_map)] = DB_MIN
     return pathgain_db
@@ -182,6 +221,58 @@ def build_roi_mask(pixel_map: np.ndarray) -> np.ndarray:
     if not mask.any():
         mask = np.ones_like(pixel_map, dtype=bool)
     return mask
+
+
+def compute_score_v2_coverage_floor(
+    coverage_target: float,
+    floor_offset: float = DEFAULT_SCORE_V2_COVERAGE_FLOOR_OFFSET,
+    floor_min: float = DEFAULT_SCORE_V2_COVERAGE_FLOOR_MIN,
+    floor_max: float = DEFAULT_SCORE_V2_COVERAGE_FLOOR_MAX,
+) -> float:
+    return float(np.clip(coverage_target + floor_offset, floor_min, floor_max))
+
+
+def _sigmoid(value: float) -> float:
+    clipped = float(np.clip(value, -60.0, 60.0))
+    return float(1.0 / (1.0 + np.exp(-clipped)))
+
+
+def load_heuristic_targets(targets_path: str | Path | None) -> dict[str, dict[str, float]]:
+    if not targets_path:
+        return {}
+    path = Path(targets_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_targets = payload.get("targets_by_image", payload)
+    if not isinstance(raw_targets, dict):
+        raise ValueError(f"Invalid heuristic targets payload: {path}")
+    targets: dict[str, dict[str, float]] = {}
+    for key, value in raw_targets.items():
+        if not isinstance(value, dict):
+            continue
+        if "coverage_target" not in value or "spectral_efficiency_target" not in value:
+            continue
+        targets[str(Path(key).expanduser().resolve())] = {
+            "coverage_target": float(value["coverage_target"]),
+            "spectral_efficiency_target": float(value["spectral_efficiency_target"]),
+        }
+    return targets
+
+
+def lookup_heuristic_targets(
+    targets: dict[str, dict[str, float]],
+    map_path: str | Path | None,
+    fallback_coverage_target: float = DEFAULT_COVERAGE_TARGET,
+    fallback_spectral_efficiency_target: float = DEFAULT_SPECTRAL_EFFICIENCY_TARGET,
+) -> tuple[float, float]:
+    if not map_path:
+        return fallback_coverage_target, fallback_spectral_efficiency_target
+    resolved = str(Path(map_path).expanduser().resolve())
+    target = targets.get(resolved)
+    if not target:
+        return fallback_coverage_target, fallback_spectral_efficiency_target
+    return float(target["coverage_target"]), float(target["spectral_efficiency_target"])
 
 
 def evaluate_radio_metrics(
@@ -221,6 +312,27 @@ def evaluate_radio_metrics(
         + w2 * max(0.0, spectral_efficiency_target - spectral_efficiency)
     )
     score = base_score - penalty
+    coverage_floor = compute_score_v2_coverage_floor(coverage_target)
+    rss_margin = float(
+        np.mean(
+            np.tanh(
+                (strongest_rx_power_dbm - coverage_threshold_db) / max(DEFAULT_SCORE_V2_MARGIN_SCALE_DB, 1e-6)
+            )
+        )
+    )
+    score_v2_gate = _sigmoid((coverage - coverage_floor) / max(DEFAULT_SCORE_V2_GATE_WIDTH, 1e-6))
+    coverage_shortfall = max(0.0, coverage_floor - coverage)
+    se_shortfall = max(0.0, DEFAULT_SCORE_V2_SE_FLOOR - spectral_efficiency)
+    score_v2_penalty = (
+        DEFAULT_SCORE_V2_COVERAGE_PENALTY_WEIGHT * (coverage_shortfall ** 2)
+        + DEFAULT_SCORE_V2_SE_PENALTY_WEIGHT * (se_shortfall ** 2)
+    )
+    score_v2 = (
+        DEFAULT_SCORE_V2_COVERAGE_WEIGHT * coverage
+        + DEFAULT_SCORE_V2_MARGIN_WEIGHT * rss_margin
+        + DEFAULT_SCORE_V2_SE_WEIGHT * score_v2_gate * spectral_efficiency
+        - score_v2_penalty
+    )
     return {
         "coverage": coverage,
         "spectral_efficiency": spectral_efficiency,
@@ -228,6 +340,11 @@ def evaluate_radio_metrics(
         "score": score,
         "base_score": base_score,
         "penalty": penalty,
+        "coverage_floor": coverage_floor,
+        "rss_margin": rss_margin,
+        "score_v2_gate": score_v2_gate,
+        "score_v2_penalty": score_v2_penalty,
+        "score_v2": score_v2,
     }
 
 
@@ -295,4 +412,6 @@ def select_reward(metrics: dict[str, float], reward_type: str) -> float:
         return float(metrics["channel_capacity"])
     if reward_type == "score":
         return float(metrics["score"])
+    if reward_type == "score_v2":
+        return float(metrics["score_v2"])
     raise ValueError(f"Unsupported reward_type: {reward_type}")

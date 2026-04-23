@@ -1,6 +1,6 @@
 """
 命令示例:
-python run_bruteforce.py \
+python run_candidate_enumeration.py \
   --height-map data/b.png \
   --k-max 12 \
   --coverage-target 0.9 \
@@ -14,9 +14,9 @@ python run_bruteforce.py \
   --candidate-stride 4
 
 算法核心思路:
-穷举搜索会先从全图抽样出一批候选点，再枚举其中满足站间距约束的站点组合，
-逐个调用代理模型求分，并返回得分最高的组合。它不是连续空间上的真穷举，
-而是“候选集上的组合穷举”。候选集较小时结果最直接、可解释；
+这个脚本会先从全图抽样出一批候选点，再枚举其中满足站间距约束的站点组合，
+逐个调用代理模型求分，并返回得分最高的组合。它不是“全合法像素上的真穷举”，
+而是“候选集上的组合枚举”。候选集较小时结果直接、可解释；
 候选集一大，组合数量会迅速膨胀。
 
 参数说明:
@@ -34,13 +34,13 @@ python run_bruteforce.py \
 --w2: 频谱效率不足惩罚权重。
 --coverage-threshold-db: 最强单站接收功率覆盖阈值，单位 dBm。
 --noise-coefficient-db: 接收机噪声系数，单位 dB。总噪声功率由热噪声密度、带宽和该系数在代码中计算。
---candidate-stride: 穷举候选点步长。
+--candidate-stride: 候选点采样步长。
 --candidate-limit: 最大候选点数。
 
 脚本逻辑说明:
 这个脚本先在 placement mask 上按步长抽样出候选站点，再在候选集里枚举所有满足间距约束的组合。
 每个组合都调用代理模型评估，覆盖率按最强单站接收功率是否过阈值计算，同时输出平均频谱效率
-`log2(1 + SINR)` 和平均信道容量 `CHANNEL_BANDWIDTH_HZ * log2(1 + SINR)`。它是“候选集上的组合穷举”，适合做小规模可解释基线。
+`log2(1 + SINR)` 和平均信道容量 `CHANNEL_BANDWIDTH_HZ * log2(1 + SINR)`。它是“候选集上的组合枚举”，适合做小规模可解释基线。
 """
 
 import argparse
@@ -55,7 +55,7 @@ import numpy as np
 import run_sa as core
 
 
-class BruteForceOptimizer:
+class CandidateEnumerationOptimizer:
     def __init__(
         self,
         predictor: core.RadioMapPredictor,
@@ -154,12 +154,12 @@ class BruteForceOptimizer:
                     }
                 )
         if best is None:
-            raise RuntimeError("No valid combination found under current brute-force settings")
+            raise RuntimeError("No valid combination found under current candidate-enumeration settings")
         return best
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Base-station deployment via brute-force search on sampled candidates")
+    parser = argparse.ArgumentParser(description="Base-station deployment via candidate-set enumeration on sampled sites")
     parser.add_argument("--height-map", required=True, type=str, help="Path to grayscale height map")
     parser.add_argument("--k-max", required=True, type=int, help="Number of sites in each enumerated layout")
     parser.add_argument("--coverage-target", required=True, type=float, help="Target coverage ratio")
@@ -199,7 +199,7 @@ def main() -> None:
     args = parse_args()
     predictor = core.RadioMapPredictor(args.model_path, args.network_type, args.device)
     height_map = core.load_height_map(args.height_map)
-    optimizer = BruteForceOptimizer(
+    optimizer = CandidateEnumerationOptimizer(
         predictor=predictor,
         height_map=height_map,
         k_max=args.k_max,
@@ -241,6 +241,7 @@ def main() -> None:
         "noise_coefficient_db": optimizer.noise_coefficient_db,
         "total_noise_power_dbm": core.compute_total_noise_power_dbm(optimizer.noise_coefficient_db),
         "best_positions_xy": best.positions.astype(float).tolist(),
+        "total_runtime_sec": time.perf_counter() - start_time,
     }
     (output_dir / "best_metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"best_score: {best.metrics.score:.6f}")
