@@ -12,7 +12,7 @@
     constraints: 约束字典，如 site_limit/site_exact。
     user_request: 原始用户请求文本。
     init_locs: 初始站点集合 [(row, col), ...]。
-    pmnet: 自定义评估函数；为空则使用默认 PMNet 代理。
+    pmnet: 自定义评估函数；为空则使用默认 RMNet 代理。
     candidate_sample: observation 中展示的候选点数量上限。
     seed: 随机种子。
     eval_device: 默认 PMNet/RMNet 评估设备。
@@ -54,7 +54,7 @@ from env_utils import (
     normalize_redundancy_target,
     roi_threshold,
 )
-from surrogate_adapter import infer_pmnet, load_pmnet
+from surrogate_adapter import infer_rmnet, load_surrogate
 
 
 class TextSpace(gym.spaces.Space):
@@ -144,10 +144,10 @@ class RadioMapEnv(gym.Env):
         # 0-255 -> 0-1
         self.pixel_map = load_map_normalized(city_map_path)
         self.eval_device = eval_device
-        # 默认使用PMNet
+        # 默认使用 RMNet；保留 pmnet 形参名仅为了兼容现有调用方。
         if pmnet is None:
-            load_pmnet(device=eval_device)
-            self.pmnet = lambda inputs: infer_pmnet(inputs, device=eval_device)
+            load_surrogate(model_type="rmnet", device=eval_device)
+            self.pmnet = lambda inputs: infer_rmnet(inputs, device=eval_device)
         else:
             self.pmnet = pmnet
         self.goal = goal

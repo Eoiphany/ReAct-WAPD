@@ -93,6 +93,52 @@ class PatchTransformerEncoder(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.norm = nn.LayerNorm(hidden_size)
 
+    def _set_position_embeddings(self, position_embeddings: torch.Tensor) -> nn.Parameter:
+        reference_weight = self.proj.weight
+        position_embeddings = position_embeddings.to(
+            device=reference_weight.device,
+            dtype=reference_weight.dtype,
+        )
+        self.position_embeddings = nn.Parameter(position_embeddings)
+        return self.position_embeddings
+
+    def _load_from_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+        local_metadata: dict,
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        key = f"{prefix}position_embeddings"
+        if key not in state_dict:
+            super()._load_from_state_dict(
+                state_dict,
+                prefix,
+                local_metadata,
+                strict,
+                missing_keys,
+                unexpected_keys,
+                error_msgs,
+            )
+            return
+
+        checkpoint_embeddings = state_dict[key]
+        if self.position_embeddings is None or self.position_embeddings.shape != checkpoint_embeddings.shape:
+            self._set_position_embeddings(checkpoint_embeddings.detach().clone())
+
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
     def _get_position_embeddings(
         self,
         num_tokens: int,
@@ -100,9 +146,9 @@ class PatchTransformerEncoder(nn.Module):
         device: torch.device,
     ) -> nn.Parameter:
         if self.position_embeddings is None or self.position_embeddings.shape[1:] != (num_tokens, hidden_size):
-            position_embeddings = nn.Parameter(torch.zeros(1, num_tokens, hidden_size, device=device))
+            position_embeddings = torch.zeros(1, num_tokens, hidden_size, device=device)
             nn.init.trunc_normal_(position_embeddings, std=0.02)
-            self.position_embeddings = position_embeddings
+            return self._set_position_embeddings(position_embeddings)
         return self.position_embeddings
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

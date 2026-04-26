@@ -10,8 +10,7 @@
 - `--dataset_limit`: 限制参与训练的地图数量。
 - `--dataset_offset`: 设定数据集子集起始偏移。
 - `--dataset_stride`: 设定数据集抽样步长。
-- `-r, --reward_type`: 可选 `coverage`、`spectral_efficiency`、`score`、`score_v2`，其中 `capacity`
-  兼容映射到 `spectral_efficiency`。
+- `-r, --reward_type`: 当前仅保留统一后的 `score`。
 - 本文件只保留 PPO 训练环境真正使用的地图读取、数据集子集选择、动作掩码、与 `Heuristic/run_sa.py` 对齐的指标计算。
 """
 
@@ -55,17 +54,18 @@ DEFAULT_W1 = float(ENV_CONFIG.get("w1", 1.0))
 DEFAULT_W2 = float(ENV_CONFIG.get("w2", 1.0))
 THERMAL_NOISE_DENSITY_DBM_PER_HZ = -174.0
 DEFAULT_NOISE_COEFFICIENT_DB = float(ENV_CONFIG.get("noise_coefficient_db", 10.0))
-DEFAULT_SCORE_V2_COVERAGE_FLOOR_OFFSET = float(ENV_CONFIG.get("score_v2_coverage_floor_offset", 0.08))
-DEFAULT_SCORE_V2_COVERAGE_FLOOR_MIN = float(ENV_CONFIG.get("score_v2_coverage_floor_min", 0.55))
-DEFAULT_SCORE_V2_COVERAGE_FLOOR_MAX = float(ENV_CONFIG.get("score_v2_coverage_floor_max", 0.75))
-DEFAULT_SCORE_V2_GATE_WIDTH = float(ENV_CONFIG.get("score_v2_gate_width", 0.02))
-DEFAULT_SCORE_V2_SE_FLOOR = float(ENV_CONFIG.get("score_v2_se_floor", 0.35))
-DEFAULT_SCORE_V2_MARGIN_SCALE_DB = float(ENV_CONFIG.get("score_v2_margin_scale_db", 6.0))
-DEFAULT_SCORE_V2_COVERAGE_WEIGHT = float(ENV_CONFIG.get("score_v2_coverage_weight", 0.5))
-DEFAULT_SCORE_V2_MARGIN_WEIGHT = float(ENV_CONFIG.get("score_v2_margin_weight", 1.0))
-DEFAULT_SCORE_V2_SE_WEIGHT = float(ENV_CONFIG.get("score_v2_se_weight", 2.0))
-DEFAULT_SCORE_V2_COVERAGE_PENALTY_WEIGHT = float(ENV_CONFIG.get("score_v2_coverage_penalty_weight", 8.0))
-DEFAULT_SCORE_V2_SE_PENALTY_WEIGHT = float(ENV_CONFIG.get("score_v2_se_penalty_weight", 1.5))
+DEFAULT_SCORE_COVERAGE_FLOOR_OFFSET = float(ENV_CONFIG.get("score_coverage_floor_offset", 0.08))
+DEFAULT_SCORE_COVERAGE_FLOOR_MIN = float(ENV_CONFIG.get("score_coverage_floor_min", 0.55))
+DEFAULT_SCORE_COVERAGE_FLOOR_MAX = float(ENV_CONFIG.get("score_coverage_floor_max", 0.75))
+DEFAULT_SCORE_MARGIN_SCALE_DB = float(ENV_CONFIG.get("score_margin_scale_db", 6.0))
+DEFAULT_SCORE_COVERAGE_WEIGHT = float(ENV_CONFIG.get("score_coverage_weight", 0.35))
+DEFAULT_SCORE_COVERAGE_BONUS_WEIGHT = float(ENV_CONFIG.get("score_coverage_bonus_weight", 0.15))
+DEFAULT_SCORE_MARGIN_WEIGHT = float(ENV_CONFIG.get("score_margin_weight", 0.15))
+DEFAULT_SCORE_SE_WEIGHT = float(ENV_CONFIG.get("score_se_weight", 1.0))
+DEFAULT_SCORE_UNDER_FLOOR_SE_WEIGHT = float(ENV_CONFIG.get("score_under_floor_se_weight", 0.05))
+DEFAULT_SCORE_SE_TARGET_CLIP = float(ENV_CONFIG.get("score_se_target_clip", 4.0))
+DEFAULT_SCORE_COVERAGE_PENALTY_WEIGHT = float(ENV_CONFIG.get("score_coverage_penalty_weight", 12.0))
+DEFAULT_SCORE_SE_PENALTY_WEIGHT = float(ENV_CONFIG.get("score_se_penalty_weight", 0.2))
 
 
 def dbm_to_mw(dbm):
@@ -223,18 +223,73 @@ def build_roi_mask(pixel_map: np.ndarray) -> np.ndarray:
     return mask
 
 
-def compute_score_v2_coverage_floor(
+def compute_score_coverage_floor(
     coverage_target: float,
-    floor_offset: float = DEFAULT_SCORE_V2_COVERAGE_FLOOR_OFFSET,
-    floor_min: float = DEFAULT_SCORE_V2_COVERAGE_FLOOR_MIN,
-    floor_max: float = DEFAULT_SCORE_V2_COVERAGE_FLOOR_MAX,
+    floor_offset: float = DEFAULT_SCORE_COVERAGE_FLOOR_OFFSET,
+    floor_min: float = DEFAULT_SCORE_COVERAGE_FLOOR_MIN,
+    floor_max: float = DEFAULT_SCORE_COVERAGE_FLOOR_MAX,
 ) -> float:
-    return float(np.clip(coverage_target + floor_offset, floor_min, floor_max))
+    return float(np.clip(coverage_target - floor_offset, floor_min, floor_max))
 
 
 def _sigmoid(value: float) -> float:
     clipped = float(np.clip(value, -60.0, 60.0))
     return float(1.0 / (1.0 + np.exp(-clipped)))
+
+
+def compute_score_components(
+    *,
+    coverage: float,
+    spectral_efficiency: float,
+    rss_margin: float,
+    coverage_target: float = DEFAULT_COVERAGE_TARGET,
+    spectral_efficiency_target: float = DEFAULT_SPECTRAL_EFFICIENCY_TARGET,
+    w1: float = DEFAULT_W1,
+    w2: float = DEFAULT_W2,
+) -> dict[str, float]:
+    coverage = float(coverage)
+    spectral_efficiency = float(spectral_efficiency)
+    rss_margin = float(rss_margin)
+    coverage_floor = compute_score_coverage_floor(coverage_target)
+    se_target = float(np.clip(float(spectral_efficiency_target), 1e-6, DEFAULT_SCORE_SE_TARGET_CLIP))
+
+    coverage_shortfall = max(0.0, coverage_floor - coverage)
+    coverage_surplus = max(0.0, coverage - coverage_floor)
+    se_shortfall = max(0.0, se_target - spectral_efficiency)
+    coverage_capped = min(coverage, coverage_floor)
+    coverage_switch = 1.0 if coverage_shortfall <= 0.0 else 0.0
+    coverage_term = DEFAULT_SCORE_COVERAGE_WEIGHT * coverage_capped
+    coverage_bonus_term = DEFAULT_SCORE_COVERAGE_BONUS_WEIGHT * coverage_surplus
+    margin_term = DEFAULT_SCORE_MARGIN_WEIGHT * rss_margin
+    se_weight = DEFAULT_SCORE_SE_WEIGHT if coverage_switch > 0.0 else DEFAULT_SCORE_UNDER_FLOOR_SE_WEIGHT
+    se_term = se_weight * spectral_efficiency
+    coverage_penalty_term = float(w1) * DEFAULT_SCORE_COVERAGE_PENALTY_WEIGHT * (coverage_shortfall ** 2)
+    se_penalty_term = (
+        float(w2) * DEFAULT_SCORE_SE_PENALTY_WEIGHT * (se_shortfall ** 2) if coverage_switch <= 0.0 else 0.0
+    )
+    penalty = coverage_penalty_term + se_penalty_term
+    base_score = coverage_term + coverage_bonus_term + margin_term + se_term
+    score = base_score - penalty
+    return {
+        "score": float(score),
+        "base_score": float(base_score),
+        "penalty": float(penalty),
+        "coverage_floor": float(coverage_floor),
+        "se_floor": float(se_target),
+        "coverage_capped": float(coverage_capped),
+        "coverage_surplus": float(coverage_surplus),
+        "coverage_term": float(coverage_term),
+        "coverage_bonus_term": float(coverage_bonus_term),
+        "margin_term": float(margin_term),
+        "se_target": float(se_target),
+        "se_term": float(se_term),
+        "se_shortfall": float(se_shortfall),
+        "coverage_penalty_term": float(coverage_penalty_term),
+        "se_penalty_term": float(se_penalty_term),
+        "coverage_switch": float(coverage_switch),
+        "score_gate": float(coverage_switch),
+        "rss_margin": float(rss_margin),
+    }
 
 
 def load_heuristic_targets(targets_path: str | Path | None) -> dict[str, dict[str, float]]:
@@ -306,45 +361,27 @@ def evaluate_radio_metrics(
     sinr_linear = strongest_rx_power_mw / np.maximum(interference_power_mw + noise_power_mw, 1e-30)
     spectral_efficiency = float(np.mean(np.log2(1.0 + sinr_linear)))
     channel_capacity = float(CHANNEL_BANDWIDTH_HZ * spectral_efficiency / BITS_PER_MEGABIT)
-    base_score = coverage + spectral_efficiency
-    penalty = (
-        w1 * max(0.0, coverage_target - coverage)
-        + w2 * max(0.0, spectral_efficiency_target - spectral_efficiency)
-    )
-    score = base_score - penalty
-    coverage_floor = compute_score_v2_coverage_floor(coverage_target)
     rss_margin = float(
         np.mean(
             np.tanh(
-                (strongest_rx_power_dbm - coverage_threshold_db) / max(DEFAULT_SCORE_V2_MARGIN_SCALE_DB, 1e-6)
+                (strongest_rx_power_dbm - coverage_threshold_db) / max(DEFAULT_SCORE_MARGIN_SCALE_DB, 1e-6)
             )
         )
     )
-    score_v2_gate = _sigmoid((coverage - coverage_floor) / max(DEFAULT_SCORE_V2_GATE_WIDTH, 1e-6))
-    coverage_shortfall = max(0.0, coverage_floor - coverage)
-    se_shortfall = max(0.0, DEFAULT_SCORE_V2_SE_FLOOR - spectral_efficiency)
-    score_v2_penalty = (
-        DEFAULT_SCORE_V2_COVERAGE_PENALTY_WEIGHT * (coverage_shortfall ** 2)
-        + DEFAULT_SCORE_V2_SE_PENALTY_WEIGHT * (se_shortfall ** 2)
-    )
-    score_v2 = (
-        DEFAULT_SCORE_V2_COVERAGE_WEIGHT * coverage
-        + DEFAULT_SCORE_V2_MARGIN_WEIGHT * rss_margin
-        + DEFAULT_SCORE_V2_SE_WEIGHT * score_v2_gate * spectral_efficiency
-        - score_v2_penalty
+    score_components = compute_score_components(
+        coverage=coverage,
+        spectral_efficiency=spectral_efficiency,
+        rss_margin=rss_margin,
+        coverage_target=coverage_target,
+        spectral_efficiency_target=spectral_efficiency_target,
+        w1=w1,
+        w2=w2,
     )
     return {
         "coverage": coverage,
         "spectral_efficiency": spectral_efficiency,
         "channel_capacity": channel_capacity,
-        "score": score,
-        "base_score": base_score,
-        "penalty": penalty,
-        "coverage_floor": coverage_floor,
-        "rss_margin": rss_margin,
-        "score_v2_gate": score_v2_gate,
-        "score_v2_penalty": score_v2_penalty,
-        "score_v2": score_v2,
+        **score_components,
     }
 
 
@@ -404,14 +441,6 @@ def get_stats(
 
 
 def select_reward(metrics: dict[str, float], reward_type: str) -> float:
-    if reward_type == "coverage":
-        return float(metrics["coverage"])
-    if reward_type in {"capacity", "spectral_efficiency"}:
-        return float(metrics["spectral_efficiency"])
-    if reward_type == "channel_capacity":
-        return float(metrics["channel_capacity"])
     if reward_type == "score":
         return float(metrics["score"])
-    if reward_type == "score_v2":
-        return float(metrics["score_v2"])
     raise ValueError(f"Unsupported reward_type: {reward_type}")

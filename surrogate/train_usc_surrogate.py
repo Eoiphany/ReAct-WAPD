@@ -1,37 +1,37 @@
 """
 用途:
-  在 USC 数据集上训练代理模型，并保存验证集上表现最好的权重。
+  在 USC 数据集上训练代理模型，基于验证集选择最优权重，并在独立测试集上输出最终评估指标。
 
 示例命令:
   训练 PMNet:
     python autodl-tmp/surrogate/train_usc_surrogate.py \
       --model-type pmnet \
       --data-root autodl-tmp/usc/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
       
   训练 RMNet:
-    python surrogate/train_usc_surrogate.py \
+    python autodl-tmp/surrogate/train_usc_surrogate.py \
       --model-type rmnet \
       --data-root autodl-tmp/usc/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
   训练 U-Net:
-    python surrogate/train_usc_surrogate.py \
+    python autodl-tmp/surrogate/train_usc_surrogate.py \
       --model-type unet \
       --data-root autodl-tmp/usc/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
   训练 TransUNet:
-    python surrogate/train_usc_surrogate.py \
+    python autodl-tmp/surrogate/train_usc_surrogate.py \
       --model-type transunet \
       --data-root autodl-tmp/usc/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
   训练 RadioUNet:
-    python surrogate/train_usc_surrogate.py \
+    python autodl-tmp/surrogate/train_usc_surrogate.py \
       --model-type radiounet \
       --data-root autodl-tmp/usc/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
       
   只评估已有权重:
-    python surrogate/train_usc_surrogate.py \
+    python autodl-tmp/surrogate/train_usc_surrogate.py \
       --model-type pmnet \
       --data-root /Users/epiphanyer/Desktop/coding/paper_experiment/usc-data \
       --csv-file autodl-tmp/usc/eval_ids.csv \
@@ -51,7 +51,8 @@
   --num-epochs: 训练轮数。
   --val-freq: 每隔多少个 epoch 做一次验证。
   --num-workers: DataLoader worker 数量。
-  --train-ratio: 训练集比例；剩余部分作为验证集。
+  --train-ratio: 训练集比例。
+  --test-ratio: 测试集比例；剩余部分作为验证集。
   --lr: Adam 学习率。
   --lr-decay: StepLR 的 gamma。
   --step: StepLR 的 step size。
@@ -59,7 +60,7 @@
   --log-every: 每多少个 step 打印一次训练 loss。
   --seed: 随机种子。
   --eval-only: 只做评估，不训练；此时建议显式传入 --csv-file 与 --checkpoint。
-  --eval-split: 评估 USC 时使用 all / train / val 哪个样本集合；若传了 --csv-file，则以 CSV 为准。
+  --eval-split: 评估 USC 时使用 all / train / val / test 哪个样本集合；若传了 --csv-file，则以 CSV 为准。
 """
 
 from __future__ import annotations
@@ -115,7 +116,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-epochs", default=30, type=int)
     parser.add_argument("--val-freq", default=1, type=int)
     parser.add_argument("--num-workers", default=4, type=int)
-    parser.add_argument("--train-ratio", default=0.9, type=float)
+    parser.add_argument("--train-ratio", default=0.7, type=float)
+    parser.add_argument("--test-ratio", default=0.2, type=float)
     parser.add_argument("--lr", default=5e-4, type=float)
     parser.add_argument("--lr-decay", default=0.5, type=float)
     parser.add_argument("--step", default=10, type=int)
@@ -123,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", default=100, type=int)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--eval-only", action="store_true")
-    parser.add_argument("--eval-split", default="all", choices=["all", "train", "val"], type=str)
+    parser.add_argument("--eval-split", default="all", choices=["all", "train", "val", "test"], type=str)
     return parser.parse_args()
 
 
@@ -140,6 +142,7 @@ class USCTrainConfig:
     val_freq: int
     num_workers: int
     train_ratio: float
+    test_ratio: float
     lr: float
     lr_decay: float
     step: int
@@ -148,6 +151,10 @@ class USCTrainConfig:
     seed: int
     eval_only: bool
     eval_split: str
+
+    @property
+    def val_ratio(self) -> float:
+        return 1.0 - self.train_ratio - self.test_ratio
 
     @property
     def param_str(self) -> str:
@@ -180,20 +187,29 @@ def save_history_csv(history: list[dict], output_path: Path) -> None:
 def split_sample_ids_deterministically(
     sample_ids: list[str],
     train_ratio: float,
+    test_ratio: float,
     seed: int,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     dataset_size = len(sample_ids)
     train_size = int(dataset_size * train_ratio)
-    val_size = dataset_size - train_size
-    if train_size <= 0 or val_size <= 0:
-        raise ValueError(f"Invalid split sizes: train={train_size}, val={val_size}, total={dataset_size}")
+    test_size = int(dataset_size * test_ratio)
+    val_size = dataset_size - train_size - test_size
+    if train_size <= 0 or val_size <= 0 or test_size <= 0:
+        raise ValueError(
+            f"Invalid split sizes: train={train_size}, val={val_size}, test={test_size}, total={dataset_size}"
+        )
 
     split_generator = torch.Generator().manual_seed(seed)
     indexed_ids = list(sample_ids)
-    train_dataset, val_dataset = random_split(indexed_ids, [train_size, val_size], generator=split_generator)
+    train_dataset, test_dataset, val_dataset = random_split(
+        indexed_ids,
+        [train_size, test_size, val_size],
+        generator=split_generator,
+    )
     train_ids = [indexed_ids[item_index] for item_index in train_dataset.indices]
+    test_ids = [indexed_ids[item_index] for item_index in test_dataset.indices]
     val_ids = [indexed_ids[item_index] for item_index in val_dataset.indices]
-    return train_ids, val_ids
+    return train_ids, val_ids, test_ids
 
 
 def save_split(sample_ids: list[str], output_path: Path) -> None:
@@ -227,9 +243,16 @@ def resolve_eval_sample_ids(cfg: USCTrainConfig) -> list[str]:
     if cfg.csv_file or cfg.eval_split == "all":
         return sample_ids
 
-    train_ids, val_ids = split_sample_ids_deterministically(sample_ids, train_ratio=cfg.train_ratio, seed=cfg.seed)
+    train_ids, val_ids, test_ids = split_sample_ids_deterministically(
+        sample_ids,
+        train_ratio=cfg.train_ratio,
+        test_ratio=cfg.test_ratio,
+        seed=cfg.seed,
+    )
     if cfg.eval_split == "train":
         return train_ids
+    if cfg.eval_split == "test":
+        return test_ids
     return val_ids
 
 
@@ -247,11 +270,17 @@ def build_eval_loader(cfg: USCTrainConfig) -> DataLoader:
     )
 
 
-def build_train_and_val_loaders(cfg: USCTrainConfig):
+def build_train_val_test_loaders(cfg: USCTrainConfig):
     sample_ids = resolve_usc_sample_ids(cfg.data_root, cfg.csv_file)
-    train_ids, val_ids = split_sample_ids_deterministically(sample_ids, train_ratio=cfg.train_ratio, seed=cfg.seed)
+    train_ids, val_ids, test_ids = split_sample_ids_deterministically(
+        sample_ids,
+        train_ratio=cfg.train_ratio,
+        test_ratio=cfg.test_ratio,
+        seed=cfg.seed,
+    )
     train_dataset = USCDataset(cfg.data_root, train_ids)
     val_dataset = USCDataset(cfg.data_root, val_ids)
+    test_dataset = USCDataset(cfg.data_root, test_ids)
 
     loader_kwargs = dict(
         num_workers=cfg.num_workers,
@@ -261,7 +290,8 @@ def build_train_and_val_loaders(cfg: USCTrainConfig):
     )
     train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, **loader_kwargs)
-    return train_loader, val_loader, train_ids, val_ids
+    test_loader = DataLoader(test_dataset, batch_size=cfg.batch_size, shuffle=False, **loader_kwargs)
+    return train_loader, val_loader, test_loader, train_ids, val_ids, test_ids
 
 
 def main() -> None:
@@ -296,9 +326,10 @@ def main() -> None:
         print(json.dumps(summary, indent=2))
         return
 
-    train_loader, val_loader, train_ids, val_ids = build_train_and_val_loaders(cfg)
+    train_loader, val_loader, test_loader, train_ids, val_ids, test_ids = build_train_val_test_loaders(cfg)
     save_split(train_ids, run_dir / "train_split.csv")
     save_split(val_ids, run_dir / "val_split.csv")
+    save_split(test_ids, run_dir / "test_split.csv")
     optimizer = optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=cfg.step, gamma=cfg.lr_decay)
 
@@ -368,15 +399,22 @@ def main() -> None:
                 metric_keys=("train_loss", "val_mse", "val_rmse", "val_r2", "best_val_rmse", "lr"),
             )
 
+    best_model = build_model(cfg.model_type, output_stride=cfg.output_stride, in_channels=2)
+    load_checkpoint(best_model, str(best_checkpoint_path), strict=True)
+    best_model = best_model.to(device)
+    test_metrics, test_sample_count = evaluate(best_model, test_loader, device)
+
     summary = {
         "dataset": "usc",
         "model_type": cfg.model_type,
         "training_mode": "from_scratch",
         "best_val_rmse": best_val_rmse,
+        "test_sample_count": test_sample_count,
         "best_checkpoint": str(best_checkpoint_path),
     }
     if best_val_metrics is not None:
         summary.update(build_prefixed_metric_summary(best_val_metrics, prefix="best_val"))
+    summary.update(build_prefixed_metric_summary(test_metrics, prefix="test"))
     with (run_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
     print(json.dumps(summary, indent=2))

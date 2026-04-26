@@ -1,0 +1,45 @@
+cd /Users/epiphanyer/Desktop/coding/paper_experiment
+
+python -m Autobs.pretrain.build_action_rank_dataset \
+  --dataset-path /Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight \
+  --dataset-limit 512 \
+  --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
+  --network-type rmnet \
+  --heuristic-targets-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/heuristic_targets.json \
+  --output-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_cov_se_switch.npz
+
+python -m Autobs.pretrain.pretrain_policy \
+  --dataset /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_cov_se_switch.npz \
+  --version single \
+  --epochs 10000 \
+  --batch-size 32 \
+  --lr 1e-4 \
+  --val-ratio 0.1 \
+  --geom-augment \
+  --target-temperature 0.5 \
+  --device mps \
+  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy_cov_se_switch
+
+python -m Autobs.bandit.train_bandit \
+  --dataset /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_cov_se_switch.npz \
+  --version single \
+  --init-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy_cov_se_switch/best_module_state.pt \
+  --epochs 2000 \
+  --batch-size 32 \
+  --lr 5e-5 \
+  --kl-coeff 0.1 \
+  --entropy-coeff 0.01 \
+  --val-ratio 0.1 \
+  --device mps \
+  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/bandit_policy_cov_se_switch
+
+python -m Autobs.compare_initialization_methods \
+  --maps-file /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/data/maps_test_paths_localrun.txt \
+  --methods random_init pretrain_init bandit_init run_sa run_greedy run_ga run_pso \
+  --k-max 1 \
+  --device mps \
+  --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
+  --pretrain-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy_cov_se_switch/best_module_state.pt \
+  --bandit-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/bandit_policy_cov_se_switch/best_module_state.pt \
+  --network-type rmnet \
+  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/init_compare_cov_se_switch

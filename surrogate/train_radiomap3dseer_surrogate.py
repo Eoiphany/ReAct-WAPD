@@ -11,31 +11,31 @@
       --output-root autodl-tmp/surrogate/runs
 
   训练 RMNet:
-    python surrogate/train_radiomap3dseer_surrogate.py \
+    python autodl-tmp/surrogate/train_radiomap3dseer_surrogate.py \
       --model-type rmnet \
       --data-root autodl-tmp/dataset/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
   训练 U-Net:
-    python surrogate/train_radiomap3dseer_surrogate.py \
+    python autodl-tmp/surrogate/train_radiomap3dseer_surrogate.py \
       --model-type unet \
       --data-root autodl-tmp/dataset/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
   训练 TransUNet:
-    python surrogate/train_radiomap3dseer_surrogate.py \
+    python autodl-tmp/surrogate/train_radiomap3dseer_surrogate.py \
       --model-type transunet \
       --data-root autodl-tmp/dataset/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
   训练 RadioUNet:
-    python surrogate/train_radiomap3dseer_surrogate.py \
+    python autodl-tmp/surrogate/train_radiomap3dseer_surrogate.py \
       --model-type radiounet \
       --data-root autodl-tmp/dataset/ \
-      --output-root surrogate/runs
+      --output-root autodl-tmp/surrogate/runs; shutdown -h now
       
   只评估已有权重:
-    python surrogate/train_radiomap3dseer_surrogate.py \
+    python autodl-tmp/surrogate/train_radiomap3dseer_surrogate.py \
       --model-type rmnet \
       --data-root autodl-tmp/dataset/ \
-      --checkpoint surrogate/checkpoints/rmnet_radiomap3dseer.pt \
+      --checkpoint autodl-tmp/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
       --csv-file /path/to/eval_pairs.csv \
       --eval-only
 
@@ -81,6 +81,7 @@ try:
     from .data_surrogate import RadioMap3DSeerDataset, resolve_radiomap_sample_pairs
     from .model_registry import ALL_MODEL_TYPES, build_model, select_prediction
     from .utils import (
+        MSE,
         build_prefixed_metric_summary,
         compute_regression_metrics,
         get_device,
@@ -93,6 +94,7 @@ except ImportError:
     from data_surrogate import RadioMap3DSeerDataset, resolve_radiomap_sample_pairs
     from model_registry import ALL_MODEL_TYPES, build_model, select_prediction
     from utils import (
+        MSE,
         build_prefixed_metric_summary,
         compute_regression_metrics,
         get_device,

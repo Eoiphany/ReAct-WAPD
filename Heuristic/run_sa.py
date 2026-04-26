@@ -76,6 +76,15 @@ CHANNEL_BANDWIDTH_HZ = 20_000_000.0
 BITS_PER_MEGABIT = 1_000_000.0
 NOISE_COEFFICIENT_DB = 10.0
 ROI_COUNT_THRESHOLDS = [1, 2]
+SCORE_COVERAGE_FLOOR_OFFSET = 0.08
+SCORE_COVERAGE_FLOOR_MIN = 0.55
+SCORE_COVERAGE_FLOOR_MAX = 0.75
+SCORE_MARGIN_SCALE_DB = 6.0
+SCORE_COVERAGE_WEIGHT = 1.2
+SCORE_MARGIN_WEIGHT = 0.3
+SCORE_SE_TARGET_CLIP = 1.0
+SCORE_COVERAGE_PENALTY_WEIGHT = 12.0
+SCORE_SE_PENALTY_WEIGHT = 0.5
 
 
 @dataclass
@@ -148,6 +157,14 @@ def compute_total_noise_power_dbm(noise_coefficient_db: float) -> float:
 
 def compute_total_noise_power_mw(noise_coefficient_db: float) -> float:
     return float(np.power(10.0, compute_total_noise_power_dbm(noise_coefficient_db) / 10.0))
+
+
+def compute_score_coverage_floor(coverage_target: float) -> float:
+    return float(np.clip(
+        coverage_target + SCORE_COVERAGE_FLOOR_OFFSET,
+        SCORE_COVERAGE_FLOOR_MIN,
+        SCORE_COVERAGE_FLOOR_MAX,
+    ))
 
 
 def load_height_map(path: str) -> np.ndarray:
@@ -400,10 +417,22 @@ def evaluate(
             redundant_pixel_count = int(np.count_nonzero(roi_covered_site_counts >= ROI_COUNT_THRESHOLDS[1]))
             redundancy_rate = redundant_pixel_count / covered_pixel_count
 
-    base_score = coverage + spectral_efficiency
-    penalty = (
-        w1 * max(0.0, coverage_target - coverage)
-        + w2 * max(0.0, spectral_efficiency_target - spectral_efficiency)
+    # score = w1 * coverage + w2 * spectral_efficiency - penalty
+    coverage_floor = compute_score_coverage_floor(coverage_target)
+    rss_margin = float(
+        np.mean(
+            np.tanh((strongest_rx_power_dbm - coverage_threshold_db) / max(SCORE_MARGIN_SCALE_DB, 1e-6))
+        )
+    )
+    coverage_shortfall = max(0.0, coverage_floor - coverage)
+    se_target = float(np.clip(float(spectral_efficiency_target), 1e-6, SCORE_SE_TARGET_CLIP))
+    se_shortfall = max(0.0, se_target - spectral_efficiency)
+    coverage_penalty_term = SCORE_COVERAGE_PENALTY_WEIGHT * (coverage_shortfall ** 2)
+    se_penalty_term = SCORE_SE_PENALTY_WEIGHT * (se_shortfall ** 2)
+    penalty = coverage_penalty_term + se_penalty_term
+    base_score = (
+        SCORE_COVERAGE_WEIGHT * coverage
+        + SCORE_MARGIN_WEIGHT * rss_margin
     )
     score = base_score - penalty
     return EvalResult(

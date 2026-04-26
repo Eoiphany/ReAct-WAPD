@@ -1,14 +1,15 @@
 """注释
 命令:
 python -m Autobs.pretrain.pretrain_policy \
-   --dataset /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_dataset.npz \
+   --dataset /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank.npz \
    --version single \
-   --epochs 10000 \
+   --epochs 1000 \
    --batch-size 32 \
    --lr 1e-4 \
    --val-ratio 0.1 \
-   --target-temperature 0.2 \
-   --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy_val
+   --geom-augment \
+   --target-temperature 0.5 \
+   --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy
 
 参数含义:
 - `--dataset`: 由 `build_action_rank_dataset.py` 生成的 `.npz` 数据集。
@@ -195,7 +196,7 @@ def apply_geometric_transform(
         int(new_row * action_side + new_col),
     )
 
-
+# 把观测样本做变换
 def apply_random_geometric_augmentation(
     observations: np.ndarray,
     action_masks: np.ndarray,

@@ -15,9 +15,81 @@ from typing import Any
 import gymnasium as gym
 import torch as th
 from ray.rllib.algorithms.ppo.torch.default_ppo_torch_rl_module import DefaultPPOTorchRLModule
+from ray.rllib.core.columns import Columns
+from ray.rllib.core.models.base import ACTOR, CRITIC, ENCODER_OUT
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.torch_utils import FLOAT_MIN
 from ray.rllib.utils.typing import TensorStructType
+
+
+class _CNNActorCriticEncoder(th.nn.Module):
+    def __init__(self, observation_space, model_config: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        if observation_space is None or not getattr(observation_space, "shape", None):
+            raise ValueError("Observation space with a concrete shape is required for CNN encoder")
+
+        model_config = model_config or {}
+        flat_dim = int(observation_space.shape[0])
+        self.in_channels, self.map_size = self._infer_channels_and_map_size(flat_dim)
+        channels = list(model_config.get("cnn_channels", [32, 64, 128, 128]))
+        feature_dim = int(model_config.get("cnn_feature_dim", 256))
+        self.feature_dim = feature_dim
+
+        blocks: list[th.nn.Module] = []
+        in_ch = self.in_channels
+        for out_ch in channels:
+            blocks.extend(
+                [
+                    th.nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1),
+                    th.nn.BatchNorm2d(out_ch),
+                    th.nn.ReLU(inplace=True),
+                ]
+            )
+            in_ch = out_ch
+        self.backbone = th.nn.Sequential(*blocks)
+        self.pool = th.nn.AdaptiveAvgPool2d((4, 4))
+        self.proj = th.nn.Sequential(
+            th.nn.Flatten(),
+            th.nn.Linear(in_ch * 4 * 4, feature_dim),
+            th.nn.ReLU(inplace=True),
+        )
+
+    @staticmethod
+    def _infer_channels_and_map_size(flat_dim: int) -> tuple[int, int]:
+        for channels in (1, 2, 3, 4):
+            if flat_dim % channels != 0:
+                continue
+            side = int(round((flat_dim / channels) ** 0.5))
+            if side * side * channels == flat_dim:
+                return channels, side
+        raise ValueError(f"Cannot infer CNN input shape from flattened dimension: {flat_dim}")
+
+    def _reshape_obs(self, obs: th.Tensor) -> th.Tensor:
+        if obs.ndim == 1:
+            obs = obs.unsqueeze(0)
+        return obs.view(obs.shape[0], self.in_channels, self.map_size, self.map_size)
+
+    def forward(self, batch: dict[str, Any]) -> dict[str, Any]:
+        obs = batch[Columns.OBS]
+        if not isinstance(obs, th.Tensor):
+            obs = th.as_tensor(obs, dtype=th.float32)
+        obs = obs.float()
+        features = self.proj(self.pool(self.backbone(self._reshape_obs(obs))))
+        return {ENCODER_OUT: {ACTOR: features, CRITIC: features}}
+
+
+class _MLPHead(th.nn.Module):
+    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int) -> None:
+        super().__init__()
+        self.net = th.nn.Module()
+        self.net.mlp = th.nn.Sequential(
+            th.nn.Linear(in_dim, hidden_dim),
+            th.nn.ReLU(inplace=True),
+            th.nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.net.mlp(x)
 
 
 class PPOActionMaskRLM(DefaultPPOTorchRLModule):
@@ -42,6 +114,21 @@ class PPOActionMaskRLM(DefaultPPOTorchRLModule):
             model_config=model_cfg,
             catalog_class=catalog_class,
         )
+
+    def setup(self):
+        self.encoder = _CNNActorCriticEncoder(self.observation_space, self.model_config)
+        # 两个 head 现在共享同一个 CNN encoder 输出特征，然后各自过一个小 MLP 头
+        """
+        也就是说，现在 actor/critic 的结构是：
+        共享 CNN backbone
+        共享投影层得到 feature_dim=256
+        actor 一个两层 MLP head
+        critic 一个两层 MLP head
+        """
+        feature_dim = int(getattr(self.encoder, "feature_dim", self.model_config.get("cnn_feature_dim", 256)))
+        head_hidden_dim = int(self.model_config.get("head_hidden_dim", feature_dim))
+        self.pi = _MLPHead(feature_dim, head_hidden_dim, int(self.action_space.n))
+        self.vf = _MLPHead(feature_dim, head_hidden_dim, 1)
 
     def _forward_inference(self, batch: TensorStructType, **kwargs) -> Mapping[str, Any]:
         return mask_forward_fn(super()._forward_inference, batch, **kwargs)

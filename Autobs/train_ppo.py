@@ -3,10 +3,24 @@
 1. `python3 -m Autobs.train_ppo -v single -r coverage --iters 30`
 
 # 训练综合得分的PPO模型，使用数据集512张图，输出checkpoint到指定目录
+# 旧方案：展平 256×256 → MLP
+# 新方法：展平 256×256 → reshape 成 1×256×256 → CNN backbone → shared feature → actor/value head
+python -m Autobs.train_ppo \
+  -v single \
+  -r score \
+  --dataset_path /Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight \
+  --dataset_limit 512 \
+  --iters 200 \
+  --module-state-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy_cnn_rmnet/best_module_state.pt \
+  --network-type rmnet \
+  --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
+  --heuristic-targets-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/heuristic_targets.json \
+  --checkpoint_dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/checkpoints_score_v2_cnn_rmnet
+
 
 python -m Autobs.train_ppo \
   -v single \
-  -r score_v2 \
+  -r score \
   --dataset_path /Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight \
   --dataset_limit 512 \
   --iters 200 \
@@ -31,8 +45,7 @@ python -m Autobs.train_ppo -v single -r score --dataset_path /root/autodl-tmp/co
 
 参数含义:
 - `-v, --version`: 训练模式，`single` 表示单站点，`multi` 表示多站点。
-- `-r, --reward_type`: 奖励类型，支持 `coverage`、`spectral_efficiency`、`score`、`score_v2`，
-  其中 `capacity` 作为兼容别名映射到 `spectral_efficiency`。
+- `-r, --reward_type`: 训练奖励类型，当前仅保留统一后的 `score`。
 - `--city_map_path`: 城市地图文件或目录路径；默认使用 `paper_experiment/dataset/png/buildingsWHeight`。
 - `--dataset_path`: `--city_map_path` 的直观别名，推荐用于显式指定数据集路径。
 - `--dataset_limit`: 仅使用数据集前 N 张图进行训练；默认不截断，使用整个目录。
@@ -73,8 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-r",
         "--reward_type",
-        choices=["coverage", "capacity", "spectral_efficiency", "channel_capacity", "score", "score_v2"],
-        default="coverage",
+        choices=["score"],
+        default="score",
     )
     parser.add_argument("--city_map_path", "--dataset_path", dest="city_map_path", default=str(DEFAULT_DATASET_MAP_DIR))
     parser.add_argument("--dataset_limit", type=int, default=None)

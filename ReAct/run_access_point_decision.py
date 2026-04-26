@@ -59,9 +59,9 @@ python autodl-tmp/code/ReAct/run_access_point_decision.py \
   --heuristic-max-evals: 外部启发式优化脚本允许的最大评估次数。
   --heuristic-candidate-stride: 候选站点采样步长，供 greedy / candidate_enum 使用。
   --heuristic-candidate-limit: 候选站点上限，供 greedy / candidate_enum 使用。
-  --eval-model: 评估模型，pmnet、rmnet 或 proxy。
+  --eval-model: 评估模型，pmnet、rmnet 或 proxy；默认使用 rmnet。
   --eval-device: PMNet/RMNet 与 heuristic 外部脚本推理设备，auto/cpu/cuda/mps。
-  --init-mode: 初始站点模式，none、random、greedy、ppo。
+  --init-mode: 初始站点模式，none、random、greedy、two_stage。
   --init-k: random 初始化时采样几个初始站点，不是候选集大小。
   --seed: 随机种子。
   --openai-api-key: OpenAI API Key；也可用环境变量 OPENAI_API_KEY。
@@ -119,7 +119,6 @@ if __package__:
         infer_max_steps,
         infer_request_overrides,
         init_locs_greedy,
-        init_locs_from_ppo,
         init_locs_random,
         load_prompt,
         normalize_metric_weights,
@@ -133,6 +132,7 @@ if __package__:
         validate_action,
     )
     from .env_utils import default_redundancy_target
+    from .init_policy import init_locs_from_two_stage_policy
     from .qwen_adapter import call_qwen_chat
     from .radiomap_env import RadioMapEnv, build_candidates, height_from_gray, sample_candidates
     from .surrogate_adapter import infer_surrogate
@@ -152,7 +152,6 @@ else:
         infer_max_steps,
         infer_request_overrides,
         init_locs_greedy,
-        init_locs_from_ppo,
         init_locs_random,
         load_prompt,
         normalize_metric_weights,
@@ -166,6 +165,7 @@ else:
         validate_action,
     )
     from env_utils import default_redundancy_target
+    from init_policy import init_locs_from_two_stage_policy
     from qwen_adapter import call_qwen_chat
     from radiomap_env import RadioMapEnv, build_candidates, height_from_gray, sample_candidates
     from surrogate_adapter import infer_surrogate
@@ -177,7 +177,7 @@ CONFIG = yaml.safe_load((ROOT_DIR / "base_config.yaml").read_text(encoding="utf-
 PATH_CFG = CONFIG.get("paths", {}) if isinstance(CONFIG, dict) else {}
 DEFAULT_PROMPT_PATH = (ROOT_DIR / PATH_CFG.get("prompt_path", "prompts/radiomap.json")).resolve()
 DEFAULT_TRAJ_DIR = (ROOT_DIR / PATH_CFG.get("traj_dir", "outputs/trajs")).resolve()
-PPO_CFG = CONFIG.get("ppo", {}) if isinstance(CONFIG, dict) else {}
+TWO_STAGE_CFG = CONFIG.get("two_stage", {}) if isinstance(CONFIG, dict) else {}
 LLAMAFACTORY_CFG = CONFIG.get("llamafactory", {}) if isinstance(CONFIG, dict) else {}
 QWEN_CFG = CONFIG.get("qwen", {}) if isinstance(CONFIG, dict) else {}
 RUNTIME_CFG = CONFIG.get("runtime", {}) if isinstance(CONFIG, dict) else {}
@@ -312,9 +312,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heuristic-max-evals", type=int, default=200)
     parser.add_argument("--heuristic-candidate-stride", type=int, default=8)
     parser.add_argument("--heuristic-candidate-limit", type=int, default=500)
-    parser.add_argument("--eval-model", choices=["pmnet", "rmnet", "proxy"], default="pmnet")
+    parser.add_argument("--eval-model", choices=["pmnet", "rmnet", "proxy"], default="rmnet")
     parser.add_argument("--eval-device", choices=["auto", "cpu", "cuda", "mps"], default=str(RUNTIME_CFG.get("eval_device", "mps")))
-    parser.add_argument("--init-mode", choices=["none", "random", "greedy", "ppo"], default="none")
+    parser.add_argument("--init-mode", choices=["none", "random", "greedy", "two_stage"], default="none")
     parser.add_argument("--init-k", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--openai-api-key", default="")
@@ -331,9 +331,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llamafactory-template", default=str(LLAMAFACTORY_CFG.get("template", "qwen")))
     parser.add_argument("--llamafactory-backend", default=str(LLAMAFACTORY_CFG.get("backend", "huggingface")))
     parser.add_argument("--llamafactory-dtype", default=str(LLAMAFACTORY_CFG.get("dtype", "auto")))
-    parser.add_argument("--ppo-checkpoint", default=str((ROOT_DIR / PPO_CFG.get("checkpoint_path", "checkpoints")).resolve()))
-    parser.add_argument("--ppo-version", choices=["single", "multi"], default=str(PPO_CFG.get("version", "single")))
-    parser.add_argument("--ppo-init-k", type=int, default=int(PPO_CFG.get("init_k", 1)))
+    parser.add_argument(
+        "--two-stage-module-state",
+        default=str((ROOT_DIR / TWO_STAGE_CFG.get("module_state_path", "../Autobs/bandit_policy/best_module_state.pt")).resolve()),
+    )
+    parser.add_argument("--two-stage-version", choices=["auto", "single", "multi"], default=str(TWO_STAGE_CFG.get("version", "auto")))
+    parser.add_argument("--two-stage-init-k", type=int, default=int(TWO_STAGE_CFG.get("init_k", 1)))
     parser.add_argument("--print-llm", action="store_true")
     parser.add_argument("--print-timing", action="store_true")
     parser.add_argument("--llm-dump-path", default="")
@@ -385,12 +388,13 @@ def run_task(args: argparse.Namespace) -> Dict[str, Any]:
             objective=objective,
             pmnet=pmnet_fn,
         )
-    elif args.init_mode == "ppo":
-        init_locs = init_locs_from_ppo(
+    elif args.init_mode == "two_stage":
+        init_locs = init_locs_from_two_stage_policy(
             city_map_path=args.city_map_path,
-            checkpoint=args.ppo_checkpoint,
-            version=args.ppo_version,
-            top_k=args.ppo_init_k,
+            module_state_path=args.two_stage_module_state,
+            version=args.two_stage_version,
+            top_k=args.two_stage_init_k,
+            device_name=args.eval_device,
         )
 
     base_env = RadioMapEnv(
@@ -500,7 +504,7 @@ def run_task(args: argparse.Namespace) -> Dict[str, Any]:
                     candidate_limit=args.heuristic_candidate_limit,
                     device=args.eval_device,
                 )
-            selected_action = next_action_from_target_layout(base_env, heuristic_target_layout)
+            selected_action = next_action_from_target_layout(base_env, heuristic_target_layout, obs_payload=obs_json)
             rationale = f"{args.planner} planner converted the cached target layout into the next closed-loop action."
         elif args.planner == "random":
             selected_action = plan_action_random(base_env, candidates, rng)

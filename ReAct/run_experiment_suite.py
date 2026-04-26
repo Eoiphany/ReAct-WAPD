@@ -49,11 +49,11 @@ python autodl-tmp/code/ReAct/run_experiment_suite.py \
 - --prompt-path / --prompt-key: 透传给单任务脚本的 prompt 配置。
 - --max-steps / --auto-steps: 单任务最大步数，或按需求文本自动推断步数。
 - --candidate-sample / --llm-top-k-candidates / --llm-decision-mode: 单任务候选点采样和 LLM 决策模式配置。
-- --eval-model / --eval-device / --init-mode / --init-k / --seed / --print-step / --print-llm / --print-timing / --llm-dump-path: 单任务评估模型、评估设备、初始化策略、日志与随机种子等配置。
+- --eval-model / --eval-device / --init-mode / --init-k / --seed / --print-step / --print-llm / --print-timing / --llm-dump-path: 单任务评估模型、评估设备、初始化策略、日志与随机种子等配置；默认评估模型为 rmnet。
 - --openai-*: planner=openai 时透传的接口参数。
 - --qwen-*: planner=qwen 时透传的本地 Qwen 参数。
 - --llamafactory-*: planner=llamafactory 时透传的 base model、adapter、template、backend、dtype。
-- --ppo-*: planner 需要 PPO 初始化时透传的 checkpoint 配置。
+- --two-stage-*: planner 需要二阶段策略学习初始化时透传的模块权重配置。
 
 逻辑说明:
 该脚本不改动 ReAct 的单任务主流程，而是把“测试地图集合 × 需求文件集合”展开成批量任务，逐个调用 run_access_point_decision.py 生成轨迹，然后复用 evaluate_decision_trajectories.py 与其轨迹统计逻辑，输出 summary.txt、summary.json 与 task_list.jsonl。
@@ -128,9 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-sample", type=int, default=64)
     parser.add_argument("--llm-top-k-candidates", type=int, default=16)
     parser.add_argument("--llm-decision-mode", choices=["decide", "explain_weighted"], default="decide")
-    parser.add_argument("--eval-model", choices=["pmnet", "rmnet", "proxy"], default="pmnet")
+    parser.add_argument("--eval-model", choices=["pmnet", "rmnet", "proxy"], default="rmnet")
     parser.add_argument("--eval-device", choices=["auto", "cpu", "cuda", "mps"], default="mps")
-    parser.add_argument("--init-mode", choices=["none", "random", "greedy", "ppo"], default="none")
+    parser.add_argument("--init-mode", choices=["none", "random", "greedy", "two_stage"], default="none")
     parser.add_argument("--init-k", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--print-llm", action="store_true")
@@ -151,9 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llamafactory-template", default="qwen")
     parser.add_argument("--llamafactory-backend", default="huggingface")
     parser.add_argument("--llamafactory-dtype", default="auto")
-    parser.add_argument("--ppo-checkpoint", default=str((ROOT_DIR / "checkpoints").resolve()))
-    parser.add_argument("--ppo-version", choices=["single", "multi"], default="single")
-    parser.add_argument("--ppo-init-k", type=int, default=1)
+    parser.add_argument("--two-stage-module-state", default=str((ROOT_DIR / "../Autobs/bandit_policy/best_module_state.pt").resolve()))
+    parser.add_argument("--two-stage-version", choices=["auto", "single", "multi"], default="auto")
+    parser.add_argument("--two-stage-init-k", type=int, default=1)
     return parser
 
 # 遍历每个字符：
@@ -283,12 +283,12 @@ def build_task_command(
         args.llamafactory_backend,
         "--llamafactory-dtype",
         args.llamafactory_dtype,
-        "--ppo-checkpoint",
-        args.ppo_checkpoint,
-        "--ppo-version",
-        args.ppo_version,
-        "--ppo-init-k",
-        str(args.ppo_init_k),
+        "--two-stage-module-state",
+        args.two_stage_module_state,
+        "--two-stage-version",
+        args.two_stage_version,
+        "--two-stage-init-k",
+        str(args.two_stage_init_k),
     ]
     if getattr(args, "print_llm", False):
         command.append("--print-llm")

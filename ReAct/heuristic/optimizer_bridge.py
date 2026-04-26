@@ -134,7 +134,48 @@ def solve_target_layout(
     return positions_rc, metrics
 
 
-def next_action_from_target_layout(env, target_layout: list[tuple[int, int]]) -> Dict[str, Any]:
+def _project_target_to_obs_candidates(
+    target_site: tuple[int, int],
+    current_set: set[tuple[int, int]],
+    obs_payload: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(obs_payload, dict):
+        return None
+    candidates = obs_payload.get("candidates") or []
+    if not isinstance(candidates, list):
+        return None
+
+    feasible: list[dict] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        try:
+            rc = (int(cand.get("row")), int(cand.get("col")))
+        except Exception:
+            continue
+        if rc in current_set:
+            continue
+        if cand.get("feasible") is False:
+            continue
+        feasible.append(cand)
+        if rc == (int(target_site[0]), int(target_site[1])):
+            return cand
+
+    if not feasible:
+        return None
+
+    target_row, target_col = int(target_site[0]), int(target_site[1])
+    return min(
+        feasible,
+        key=lambda cand: (int(cand["row"]) - target_row) ** 2 + (int(cand["col"]) - target_col) ** 2,
+    )
+
+
+def next_action_from_target_layout(
+    env,
+    target_layout: list[tuple[int, int]],
+    obs_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     current_locs = list(env.tx_locs)
     current_set = {(int(r), int(c)) for r, c in current_locs}
     target_set = {(int(r), int(c)) for r, c in target_layout}
@@ -148,8 +189,14 @@ def next_action_from_target_layout(env, target_layout: list[tuple[int, int]]) ->
         row, col = missing[0]
         return {"name": "Refine", "args": {"rule_or_delta": {"op": "move", "id": int(extra_idx), "row": int(row), "col": int(col)}}}
     if missing:
-        row, col = missing[0]
-        z_m = float(env.pixel_map[int(row), int(col)] * (19.8 - 6.6) + 6.6 + 3.0)
+        chosen = _project_target_to_obs_candidates(missing[0], current_set, obs_payload)
+        if chosen is not None:
+            row = int(chosen["row"])
+            col = int(chosen["col"])
+            z_m = float(chosen.get("z_m", env.pixel_map[row, col] * (19.8 - 6.6) + 6.6 + 3.0))
+        else:
+            row, col = missing[0]
+            z_m = float(env.pixel_map[int(row), int(col)] * (19.8 - 6.6) + 6.6 + 3.0)
         return {"name": "Propose", "args": {"sites": [{"row": int(row), "col": int(col), "z_m": z_m}], "mode": "add"}}
     if extra:
         extra_site = extra[0]

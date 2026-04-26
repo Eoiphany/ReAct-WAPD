@@ -13,17 +13,18 @@ env:
   w1: 1.0
   w2: 1.0
   noise_coefficient_db: 10.0
-  score_v2_coverage_floor_offset: 0.08
-  score_v2_coverage_floor_min: 0.55
-  score_v2_coverage_floor_max: 0.75
-  score_v2_gate_width: 0.02
-  score_v2_se_floor: 0.35
-  score_v2_margin_scale_db: 6.0
-  score_v2_coverage_weight: 0.5
-  score_v2_margin_weight: 1.0
-  score_v2_se_weight: 2.0
-  score_v2_coverage_penalty_weight: 8.0
-  score_v2_se_penalty_weight: 1.5
+  score_coverage_floor_offset: 0.01
+  score_coverage_floor_min: 0.0
+  score_coverage_floor_max: 1.0
+  score_margin_scale_db: 6.0
+  score_coverage_weight: 0.35
+  score_coverage_bonus_weight: 0.15
+  score_margin_weight: 0.15
+  score_se_weight: 1.0
+  score_under_floor_se_weight: 0.05
+  score_se_target_clip: 4.0
+  score_coverage_penalty_weight: 12.0
+  score_se_penalty_weight: 0.2
   pathgain_db_min: -162.0
   pathgain_db_max: -75.0
   channel_bandwidth_hz: 20000000.0
@@ -41,5 +42,6 @@ train:
   num_epochs: 5
   clip_param: 0.1
   model:
-    fcnet_hiddens: [128, 128, 128, 128]
-    fcnet_activation: relu
+    cnn_channels: [32, 64, 128, 128]
+    cnn_feature_dim: 256
+    head_hidden_dim: 256

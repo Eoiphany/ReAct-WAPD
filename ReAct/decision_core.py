@@ -333,43 +333,6 @@ def infer_max_steps(user_request: str, base: int = 8) -> int:
     return max(3, min(15, steps))
 
 
-_PPO_AGENT_CACHE: Dict[str, Any] = {}
-
-
-def _load_ppo_agent(checkpoint: str):
-    if checkpoint in _PPO_AGENT_CACHE:
-        return _PPO_AGENT_CACHE[checkpoint]
-    try:
-        from ray.rllib.algorithms.algorithm import Algorithm
-    except Exception as exc:
-        raise RuntimeError("PPO 初始化需要 ray[rllib] 环境，请先安装依赖。") from exc
-    agent = Algorithm.from_checkpoint(str(Path(checkpoint).resolve()))
-    _PPO_AGENT_CACHE[checkpoint] = agent
-    return agent
-
-# 把 PPO 策略前向跑一遍，拿到每个动作的原始分数
-def _compute_rllib_logits(agent, observation: Dict[str, Any]) -> np.ndarray:
-    try:
-        module = agent.get_module()
-    except Exception:
-        module = agent.get_module("default_policy")
-    action_dist_class = module.get_inference_action_dist_cls()
-    import torch
-
-    obs = observation["observations"]
-    mask = observation["action_mask"]
-    obs_tensor = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-    mask_tensor = torch.as_tensor(mask, dtype=torch.float32).unsqueeze(0)
-    fwd_ins = {"obs": {"observations": obs_tensor, "action_mask": mask_tensor}}
-    fwd_out = module.forward_inference(fwd_ins)
-    # 策略在 softmax 之前对每个动作的 logits
-    logits = fwd_out["action_dist_inputs"]
-    if hasattr(logits, "detach"):
-        return logits[0].detach().cpu().numpy()
-    action_dist = action_dist_class.from_logits(logits)
-    return action_dist.logits[0].detach().cpu().numpy()
-
-
 def _resize_map(pixel_map: np.ndarray, size: Tuple[int, int]) -> np.ndarray:
     if pixel_map.shape == size:
         return pixel_map
@@ -399,34 +362,6 @@ def init_locs_random(city_map_path: str, seed: int, k: int = 1) -> List[Tuple[in
         row, col = calc_upsampling_loc(int(action_id))
         out.append((int(row), int(col)))
     return out
-
-# 从所有合法动作里挑出 logits 最高的 top_k 个位置，作为初始站点返回，不是候选池大小
-def init_locs_from_ppo(city_map_path: str, checkpoint: str, version: str = "single", top_k: int = 1) -> List[Tuple[int, int]]:
-    agent = _load_ppo_agent(checkpoint)
-    pixel_map = load_map_normalized(city_map_path)
-    pixel_map = _resize_map(pixel_map, (map_size, map_size))
-    mask = calc_action_mask(pixel_map)
-    # 把二维地图拉平成一维向量，如果是 "multi"，就把输入复制两遍
-    flat = pixel_map.reshape(-1).astype(np.float32)
-    obs = np.tile(flat, 2) if version == "multi" else flat
-    observation = {"observations": obs, "action_mask": mask}
-    # 拿到每个 action 的打分
-    logits = _compute_rllib_logits(agent, observation)
-    logits = np.array(logits, dtype=np.float32)
-    logits[mask <= 0.5] = -1e9
-    k = min(max(int(top_k), 1), int(np.sum(mask > 0.5)))
-    if k <= 0:
-        return []
-    # 找出 logits 最大的前 k 个“索引”（但不排序）
-    # np.argpartition(arr, k)的功能是保证前 k 个元素是最小的 top-k 个（顺序不保证）
-    top_ids = np.argpartition(-logits, k - 1)[:k]
-    top_ids = top_ids[np.argsort(-logits[top_ids])]
-    locs = []
-    for action_id in top_ids:
-        row, col = calc_upsampling_loc(int(action_id))
-        locs.append((int(row), int(col)))
-    return locs
-
 
 def _extract_first_site_from_action(action: Dict[str, Any]) -> Optional[Tuple[int, int]]:
     if not isinstance(action, dict) or action.get("name") != "Propose":

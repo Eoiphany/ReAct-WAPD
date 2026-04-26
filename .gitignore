@@ -18,13 +18,20 @@ usc-data/
 /Autobs/outputs/
 /Autobs/rl_module/__pycache__/
 /Autobs/rl_module/__init__.py
-/Autobs/test/
+!/Autobs/test/
+/Autobs/test/*
+!/Autobs/test/test_env_score_shape.py
 /Autobs/__init__.py
 /Autobs/pretrained_policy/
 /Autobs/pretrained_policy_val/
 /Autobs/checkpoints_score_v2_pretrained/
 /Autobs/checkpoints_zonghe/
 /Autobs/checkpoints_score/
+/Autobs/bandit_policy/
+/Autobs/bandit_policy_cov_se_switch/
+/Autobs/pretrained_policy/
+/Autobs/pretrained_policy_val/
+/Autobs/pretrained_policy_cov_se_switch/
 
 /dataset/
 
@@ -42,6 +49,7 @@ usc-data/
 /ReAct/__pycache__/
 /ReAct/test/
 /ReAct/vis/
+/ReAct/outputs/
 /ReAct/__init__.py
 
 /surrogate/__pycache__/
@@ -56,5 +64,7 @@ usc-data/
 /surrogate/checkpoints/
 /surrogate/test/
 /surrogate/output_pred/
+/surrogate/plots/
+/surrogate/all_model_summary/
 /surrogate/runs/
 /surrogate/vis/

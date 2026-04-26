@@ -1,21 +1,23 @@
 """注释
 命令:
+
 python -m Autobs.pretrain.build_action_rank_dataset \
-   --dataset-path /Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight \
-   --dataset-limit 512 \
-   --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
-   --network-type rmnet \
-   --heuristic-targets-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/heuristic_targets.json \
-   --output-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_dataset.npz
+  --dataset-path /Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight \
+  --dataset-limit 512 \
+  --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
+  --network-type rmnet \
+  --heuristic-targets-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/heuristic_targets.json \
+  --output-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank.npz
 
 参数含义:
 - `--dataset-path`: 输入地图目录、单图路径或逗号分隔路径列表。
 - `--dataset-limit / --dataset-offset / --dataset-stride`: 数据子集控制，决定生成多少张图的监督样本。
 - `--model-path`: surrogate 权重路径，用于对每个合法动作打分。
 - `--network-type`: surrogate 模型类型，需与 `--model-path` 匹配。
-- `--heuristic-targets-path`: 可选的场景目标文件；若提供，则按场景 target 计算 `score/score_v2`。
-- `--reward-key`: 用哪一个指标作为动作排序分数，默认 `score_v2`。
-- `--output-path`: 输出记录所有轨迹的 `.npz` 路径；会同时写一个同名 `.json` 元数据文件，仅记录[1/512] 0.png legal=508 best_action=690 score_v2=1.0989。
+- `--heuristic-targets-path`: 可选的场景目标文件；若提供，则按场景 target 计算统一后的 `score`。
+- `--reward-key`: 用哪一个指标作为动作排序分数；当前仅保留统一后的 `score`。
+- `--output-path`: 输出记录所有轨迹的 `.npz` 路径；会同时写一个同名 `.json` 元数据文件，仅记录如
+  `[1/512] 0.png legal=508 best_action=690 score=1.0989` 这类摘要。
 
 脚本逻辑说明:
 本脚本对每张图枚举当前动作空间下的全部合法 action，使用与训练一致的 surrogate 和 reward
@@ -52,7 +54,7 @@ from Autobs.paths import DEFAULT_DATASET_MAP_DIR, PACKAGE_ROOT
 
 DEFAULT_OUTPUT_PATH = PACKAGE_ROOT / "outputs" / "action_rank_dataset.npz"
 NEGATIVE_SENTINEL = -1e9
-REWARD_KEY_CHOICES = ("score_v2", "score", "coverage", "spectral_efficiency", "channel_capacity")
+REWARD_KEY_CHOICES = ("score",)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--network-type", default="pmnet", choices=["pmnet", "pmnet_v3", "rmnet", "rmnet_v3"])
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--heuristic-targets-path", default=None)
-    parser.add_argument("--reward-key", default="score_v2", choices=REWARD_KEY_CHOICES)
+    parser.add_argument("--reward-key", default="score", choices=REWARD_KEY_CHOICES)
     parser.add_argument("--output-path", default=str(DEFAULT_OUTPUT_PATH), type=str)
     return parser
 
@@ -167,7 +169,10 @@ def build_dataset(args: argparse.Namespace) -> tuple[dict[str, np.ndarray], dict
             f"[{map_index}/{len(map_paths)}] {map_path.name} "
             f"legal={int(np.count_nonzero(action_mask > 0.0))} "
             f"best_action={best_action} "
-            f"{args.reward_key}={best_metrics[args.reward_key]:.4f}"
+            f"score={best_metrics['score']:.4f} "
+            f"coverage={best_metrics['coverage']:.4f} "
+            f"se={best_metrics['spectral_efficiency']:.4f} "
+            f"capacity={best_metrics['channel_capacity']:.4f}"
         )
 
     arrays = {

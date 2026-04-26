@@ -18,9 +18,9 @@ surrogate_models:
     weights_path: ../surrogate/checkpoints/rmnet_radiomap3dseer.pt
     builder_name: build_rmnet
 
-ppo:
-  checkpoint_path: checkpoints
-  version: single
+two_stage:
+  module_state_path: ../Autobs/bandit_policy/best_module_state.pt
+  version: auto
   init_k: 1
 
 llamafactory:
