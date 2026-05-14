@@ -119,8 +119,19 @@ class LoggingWrapper(gym.Wrapper):
 
     def write(self):
         self.update_record()
-        with open(self.file_path, "w", encoding="utf-8") as f:
+        temp_path = f"{self.file_path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(self.trajs, f, ensure_ascii=True, indent=2)
+        os.replace(temp_path, self.file_path)
+
+    def write_snapshot(self):
+        payload = list(self.trajs)
+        if len(self.traj) > 0:
+            payload.append(self.traj)
+        temp_path = f"{self.file_path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=True, indent=2)
+        os.replace(temp_path, self.file_path)
 
     def close(self):
         self.write()

@@ -1,7 +1,7 @@
 """注释
 命令:
-1. `python -m ReAct.run_access_point_decision --init-mode two_stage --two-stage-module-state ../Autobs/bandit_policy/best_module_state.pt`
-2. `python -m ReAct.run_experiment_suite --init-mode two_stage --two-stage-module-state ../Autobs/bandit_policy/best_module_state.pt`
+1. `python -m ReAct.run_access_point_decision --init-mode two_stage --two-stage-module-state ../Autobs/outputs/rerank/best_module_state.pt`
+2. `python -m ReAct.run_experiment_suite --init-mode two_stage --two-stage-module-state ../Autobs/outputs/rerank/best_module_state.pt`
 
 参数含义:
 - `infer_module_state_observation_version(module_state_path)`: 根据二阶段策略模块权重的输入通道数推断 `single/multi` 观测版本。
@@ -18,12 +18,14 @@ PPO checkpoint 或 Ray/RLlib 的运行时恢复接口。
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
 import sys
 from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 from PIL import Image
+from torchvision import transforms
 
 if __package__ in {None, ""}:
     _CURRENT_FILE = Path(__file__).resolve()
@@ -31,10 +33,8 @@ if __package__ in {None, ""}:
     if str(_PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(_PACKAGE_PARENT))
 
-from Autobs.env.utils import (
-    DEFAULT_COVERAGE_TARGET as AUTOBS_DEFAULT_COVERAGE_TARGET,
+from Autobs.utils import (
     DEFAULT_SCORE_MARGIN_SCALE_DB as AUTOBS_DEFAULT_SCORE_MARGIN_SCALE_DB,
-    DEFAULT_SPECTRAL_EFFICIENCY_TARGET as AUTOBS_DEFAULT_SPECTRAL_EFFICIENCY_TARGET,
     compute_score_components as compute_autobs_score_components,
 )
 from env_utils import (
@@ -48,17 +48,29 @@ from env_utils import (
     map_size,
     normalized_pathgain_to_db,
 )
-from surrogate_adapter import infer_rmnet
+from heuristic.optimizer_bridge import solve_target_layout
+from surrogate_adapter import MODEL_CFG
 
 
 _POLICY_CACHE: Dict[Tuple[str, str, str], "_TwoStageInitPolicy"] = {}
-SCORE_RERANK_TOP_N = 8
+_ISOLATED_SURROGATE_CACHE: Dict[Tuple[str, str, str], "_IsolatedSurrogatePredictor"] = {}
+SCORE_RERANK_TOP_N = 32
 SCORE_RERANK_COVERAGE_WINDOW = 0.01
+REACT_TWO_STAGE_RERANK_COVERAGE_TARGET = 0.92
+REACT_TWO_STAGE_RERANK_SPECTRAL_EFFICIENCY_TARGET = 1.85
 
 
 def load_module_state(module_state_path: str | Path) -> dict:
     path = Path(module_state_path).expanduser().resolve()
-    payload = torch.load(path, map_location="cpu")
+    if not path.is_file():
+        raise FileNotFoundError(f"Two-stage module state not found: {path}")
+    try:
+        payload = torch.load(path, map_location="cpu")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load two-stage module state from {path}. "
+            "The file may be truncated, corrupted, or not a valid PyTorch checkpoint."
+        ) from exc
     if isinstance(payload, dict) and "state_dict" in payload:
         payload = payload["state_dict"]
     if not isinstance(payload, dict):
@@ -101,6 +113,73 @@ def _resolve_device(device_name: str) -> torch.device:
     return torch.device(device_name)
 
 
+def _enable_deterministic_torch_runtime() -> None:
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception:
+        pass
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    if hasattr(torch.backends, "mkldnn"):
+        try:
+            torch.backends.mkldnn.enabled = False
+        except Exception:
+            pass
+
+
+class _IsolatedSurrogatePredictor:
+    def __init__(self, model_type: str, model_path: str | Path, device_name: str) -> None:
+        cfg = MODEL_CFG.get(model_type) or {}
+        model_py_rel = cfg.get("model_py_path")
+        builder_name = cfg.get("builder_name")
+        if not model_py_rel or not builder_name:
+            raise KeyError(f"ReAct surrogate config missing model definition for {model_type}")
+
+        model_py_path = (Path(__file__).resolve().parent / model_py_rel).resolve()
+        checkpoint_path = Path(model_path).expanduser().resolve()
+        spec = importlib.util.spec_from_file_location(f"isolated_{model_type}_model", model_py_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load model definition from {model_py_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        builder = getattr(module, builder_name, None)
+        if builder is None:
+            raise AttributeError(f"{builder_name} not found in {model_py_path}")
+
+        self.device = _resolve_device(device_name)
+        self.model = builder(output_stride=16)
+        state = torch.load(str(checkpoint_path), map_location="cpu")
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        if isinstance(state, dict) and any(str(key).startswith("module.") for key in state):
+            state = {str(key).replace("module.", "", 1): value for key, value in state.items()}
+        self.model.load_state_dict(state)
+        self.model.to(self.device)
+        self.model.eval()
+
+    def __call__(self, inputs: np.ndarray) -> np.ndarray:
+        tensor = transforms.ToTensor()(inputs).float().unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            pred = torch.clamp(self.model(tensor), 0.0, 1.0)
+        return pred[0, 0].detach().cpu().numpy().astype(np.float32)
+
+
+def _build_isolated_rmnet_fn(device_name: str):
+    rmnet_cfg = MODEL_CFG.get("rmnet") or {}
+    weights_rel = rmnet_cfg.get("weights_path")
+    if not weights_rel:
+        raise KeyError("ReAct surrogate config missing rmnet.weights_path")
+    weights_path = (Path(__file__).resolve().parent / weights_rel).resolve()
+    cache_key = ("rmnet", str(weights_path), str(_resolve_device(device_name)))
+    predictor = _ISOLATED_SURROGATE_CACHE.get(cache_key)
+    if predictor is None:
+        predictor = _IsolatedSurrogatePredictor("rmnet", weights_path, device_name)
+        _ISOLATED_SURROGATE_CACHE[cache_key] = predictor
+    return predictor
+
+
 def _resize_map(pixel_map: np.ndarray, size: Tuple[int, int]) -> np.ndarray:
     if pixel_map.shape == size:
         return pixel_map
@@ -126,13 +205,7 @@ class _CNNActorEncoder(torch.nn.Module):
             )
             in_channels = out_channels
         self.backbone = torch.nn.Sequential(*blocks)
-        self.pool = torch.nn.AdaptiveAvgPool2d((4, 4))
-        self.proj = torch.nn.Sequential(
-            torch.nn.Flatten(),
-            torch.nn.Linear(in_channels * 4 * 4, feature_dim),
-            torch.nn.ReLU(inplace=True),
-        )
-        self.feature_dim = feature_dim
+        self.actor_out_channels = in_channels
 
     @staticmethod
     def _infer_channels_and_map_side(input_dim: int) -> Tuple[int, int]:
@@ -148,21 +221,31 @@ class _CNNActorEncoder(torch.nn.Module):
         if observations.ndim == 1:
             observations = observations.unsqueeze(0)
         batch = observations.view(observations.shape[0], self.in_channels, self.map_side, self.map_side)
-        return self.proj(self.pool(self.backbone(batch.float())))
+        return self.backbone(batch.float())
 
 
-class _MLPHead(torch.nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int) -> None:
+class _HeatmapPolicyHead(torch.nn.Module):
+    def __init__(self, in_channels: int, hidden_dim: int, out_dim: int) -> None:
         super().__init__()
-        self.net = torch.nn.Module()
-        self.net.mlp = torch.nn.Sequential(
-            torch.nn.Linear(in_dim, hidden_dim),
+        action_side = int(round(out_dim ** 0.5))
+        if action_side * action_side != out_dim:
+            raise ValueError(f"Action space size must be a perfect square, got {out_dim}")
+        conv_hidden = max(int(hidden_dim // 2), 32)
+        dropout = 0.15
+        self.action_side = action_side
+        self.net = torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
             torch.nn.ReLU(inplace=True),
-            torch.nn.Linear(hidden_dim, out_dim),
+            torch.nn.Dropout2d(p=dropout),
+            torch.nn.Conv2d(hidden_dim, conv_hidden, kernel_size=3, padding=1),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Dropout2d(p=dropout),
+            torch.nn.Upsample(size=(self.action_side, self.action_side), mode="bilinear", align_corners=False),
+            torch.nn.Conv2d(conv_hidden, 1, kernel_size=1),
         )
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.net.mlp(features)
+        return self.net(features).flatten(start_dim=1)
 
 
 class _TwoStageInitPolicy(torch.nn.Module):
@@ -171,7 +254,11 @@ class _TwoStageInitPolicy(torch.nn.Module):
         input_channels = 1 if version == "single" else 2
         input_dim = input_channels * map_size * map_size
         self.encoder = _CNNActorEncoder(input_dim=input_dim, feature_dim=256)
-        self.pi = _MLPHead(in_dim=256, hidden_dim=256, out_dim=int(calc_action_mask(np.ones((map_size, map_size), dtype=np.float32)).size))
+        self.pi = _HeatmapPolicyHead(
+            in_channels=self.encoder.actor_out_channels,
+            hidden_dim=256,
+            out_dim=int(calc_action_mask(np.ones((map_size, map_size), dtype=np.float32)).size),
+        )
 
     def forward(self, observations: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
         logits = self.pi(self.encoder(observations))
@@ -225,6 +312,7 @@ def _build_policy_observation(
     selected_actions: List[int],
     version: str,
     coverage_threshold_db: float,
+    rmnet_fn,
 ) -> Dict[str, np.ndarray]:
     action_mask = _mask_selected_actions(calc_action_mask(pixel_map).astype(np.float32), selected_actions)
     if version == "single":
@@ -236,7 +324,7 @@ def _build_policy_observation(
     if not tx_locs:
         obs = np.tile(pixel_map.reshape(-1), 2).astype(np.float32)
     else:
-        strongest_pathgain_norm, _, _, _ = get_stats(pixel_map, tx_locs, infer_rmnet)
+        strongest_pathgain_norm, _, _, _ = get_stats(pixel_map, tx_locs, rmnet_fn)
         strongest_pathgain_db = normalized_pathgain_to_db(strongest_pathgain_norm)
         strongest_rx_power_dbm = TX_POWER_DBM + strongest_pathgain_db.astype(np.float64)
         covered = (strongest_rx_power_dbm >= coverage_threshold_db).astype(np.float32)
@@ -260,8 +348,9 @@ def _score_candidate_layout(
     pixel_map: np.ndarray,
     tx_locs: List[Tuple[int, int]],
     coverage_threshold_db: float,
+    rmnet_fn,
 ) -> dict[str, float]:
-    strongest_pathgain_norm, coverage_reward, spectral_efficiency_reward, _ = get_stats(pixel_map, tx_locs, infer_rmnet)
+    strongest_pathgain_norm, coverage_reward, spectral_efficiency_reward, _ = get_stats(pixel_map, tx_locs, rmnet_fn)
     strongest_pathgain_db = normalized_pathgain_to_db(strongest_pathgain_norm)
     roi_mask = _roi_mask(pixel_map)
     roi_rx_power_dbm = TX_POWER_DBM + np.asarray(strongest_pathgain_db, dtype=np.float64)[roi_mask]
@@ -279,8 +368,8 @@ def _score_candidate_layout(
         coverage=float(coverage_reward),
         spectral_efficiency=float(spectral_efficiency_reward),
         rss_margin=rss_margin,
-        coverage_target=AUTOBS_DEFAULT_COVERAGE_TARGET,
-        spectral_efficiency_target=AUTOBS_DEFAULT_SPECTRAL_EFFICIENCY_TARGET,
+        coverage_target=REACT_TWO_STAGE_RERANK_COVERAGE_TARGET,
+        spectral_efficiency_target=REACT_TWO_STAGE_RERANK_SPECTRAL_EFFICIENCY_TARGET,
     )
     return {
         "coverage": float(coverage_reward),
@@ -295,6 +384,7 @@ def _compute_policy_action_with_score_rerank(
     pixel_map: np.ndarray,
     tx_locs: List[Tuple[int, int]],
     coverage_threshold_db: float,
+    rmnet_fn,
     rerank_top_n: int = SCORE_RERANK_TOP_N,
 ) -> int:
     logits = _compute_policy_logits(model, observation)
@@ -311,25 +401,22 @@ def _compute_policy_action_with_score_rerank(
     candidate_actions = legal_actions[top_order]
 
     best_action = int(candidate_actions[0])
-    best_coverage = -float("inf")
     candidate_summaries = []
     for action in candidate_actions.astype(int).tolist():
-        candidate_tx_locs = tx_locs + [calc_upsampling_loc(action)]
+        candidate_tx_locs = tx_locs + [calc_upsampling_loc(action, pixel_map)]
         candidate_metrics = _score_candidate_layout(
             pixel_map=pixel_map,
             tx_locs=candidate_tx_locs,
             coverage_threshold_db=coverage_threshold_db,
+            rmnet_fn=rmnet_fn,
         )
-        best_coverage = max(best_coverage, float(candidate_metrics["coverage"]))
         candidate_summaries.append((action, candidate_metrics, float(logits[action].item())))
 
-    best_key = (-float("inf"), -float("inf"), -float("inf"), -float("inf"), -float("inf"))
+    best_key = (-float("inf"), -float("inf"), -float("inf"), -float("inf"))
     for action, candidate_metrics, logit_value in candidate_summaries:
-        near_best_coverage = 1.0 if float(candidate_metrics["coverage"]) >= (best_coverage - SCORE_RERANK_COVERAGE_WINDOW) else 0.0
         candidate_key = (
-            near_best_coverage,
-            float(candidate_metrics["coverage"]),
             float(candidate_metrics["spectral_efficiency"]),
+            float(candidate_metrics["coverage"]),
             float(candidate_metrics["score"]),
             logit_value,
         )
@@ -347,8 +434,10 @@ def init_locs_from_two_stage_policy(
     device_name: str = "auto",
     coverage_threshold_db: float = default_coverage_threshold_db,
 ) -> List[Tuple[int, int]]:
+    _enable_deterministic_torch_runtime()
     resolved_version = infer_module_state_observation_version(module_state_path) if version == "auto" else version
     model = _load_policy_model(module_state_path, resolved_version, device_name)
+    rmnet_fn = _build_isolated_rmnet_fn(device_name)
     pixel_map = _resize_map(load_map_normalized(city_map_path), (map_size, map_size))
 
     selected_actions: List[int] = []
@@ -361,6 +450,7 @@ def init_locs_from_two_stage_policy(
             selected_actions=selected_actions,
             version=resolved_version,
             coverage_threshold_db=coverage_threshold_db,
+            rmnet_fn=rmnet_fn,
         )
         if float(np.sum(observation["action_mask"])) <= 0.0:
             break
@@ -370,9 +460,45 @@ def init_locs_from_two_stage_policy(
             pixel_map=pixel_map,
             tx_locs=tx_locs,
             coverage_threshold_db=coverage_threshold_db,
+            rmnet_fn=rmnet_fn,
         )
         if observation["action_mask"][action] <= 0.0:
             raise RuntimeError(f"Two-stage policy selected an illegal or repeated action: {action}")
         selected_actions.append(action)
-        tx_locs.append(calc_upsampling_loc(action))
+        tx_locs.append(calc_upsampling_loc(action, pixel_map))
     return tx_locs
+
+
+def init_locs_from_heuristic_layout(
+    city_map_path: str,
+    goal: dict,
+    constraints: dict,
+    planner_name: str,
+    eval_model: str,
+    eval_model_path: str,
+    eval_device: str,
+    output_dir: str | Path,
+    top_k: int = 1,
+    max_evals: int = 100,
+    candidate_stride: int = 12,
+    candidate_limit: int = 256,
+) -> List[Tuple[int, int]]:
+    requested_sites = max(1, int(top_k))
+    init_constraints = dict(constraints or {})
+    init_constraints["site_limit"] = requested_sites
+    init_constraints["site_exact"] = requested_sites
+    positions, _ = solve_target_layout(
+        planner_name=planner_name,
+        height_map_path=city_map_path,
+        goal=goal,
+        constraints=init_constraints,
+        eval_model=eval_model,
+        eval_model_path=eval_model_path,
+        output_dir=Path(output_dir),
+        fallback_k=requested_sites,
+        max_evals=max_evals,
+        candidate_stride=candidate_stride,
+        candidate_limit=candidate_limit,
+        device=eval_device,
+    )
+    return [(int(row), int(col)) for row, col in positions[:requested_sites]]

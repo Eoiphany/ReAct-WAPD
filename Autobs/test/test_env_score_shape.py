@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import unittest
 
-from Autobs.env.utils import compute_score_components
+from Autobs.utils import compute_score_components
 
 
 class EnvScoreShapeTests(unittest.TestCase):

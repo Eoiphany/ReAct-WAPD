@@ -7,7 +7,7 @@
 
 导出对象与参数:
   AVAILABLE_MODEL_TYPES / ALL_MODEL_TYPES
-    可用模型列表 / 包含显式不可用模型的完整列表。
+    可用模型列表；ALL_MODEL_TYPES 与 AVAILABLE_MODEL_TYPES 保持一致，仅用于兼容现有脚本导入。
   build_model(model_type, output_stride=16, in_channels=2)
     model_type: 模型名。
     output_stride: 需要时传给对应模型。

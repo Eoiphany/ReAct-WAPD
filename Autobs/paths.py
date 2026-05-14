@@ -1,10 +1,10 @@
 """注释
 命令:
-- `Python -m Autobs.train_ppo`
+- `Python -m Autobs.pretrain_policy`
 
 参数含义:
 - `Python`: 使用当前环境的 Python 解释器。
-- `-m Autobs.train_ppo`: 运行 PPO 训练入口，内部会依赖本文件定义的项目内路径。
+- `-m Autobs.pretrain_policy`: 运行 策略学习相关入口，内部会依赖本文件定义的项目内路径。
 - 训练运行时默认读取 `Autobs/config.yaml`，默认写入 `Autobs/checkpoints`，默认读取 `Autobs/models`。
 - 训练地图默认来自 `paper_experiment/dataset/png/buildingsWHeight`，不再默认单图训练。
 """
@@ -43,7 +43,3 @@ def resolve_default_dataset_map_dir(project_root: Path) -> Path:
 
 
 DEFAULT_DATASET_MAP_DIR = resolve_default_dataset_map_dir(PROJECT_ROOT)
-
-
-def ensure_runtime_dirs() -> None:
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)

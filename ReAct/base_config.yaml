@@ -19,7 +19,7 @@ surrogate_models:
     builder_name: build_rmnet
 
 two_stage:
-  module_state_path: ../Autobs/bandit_policy/best_module_state.pt
+  module_state_path: ../Autobs/outputs/rerank/best_module_state.pt
   version: auto
   init_k: 1
 

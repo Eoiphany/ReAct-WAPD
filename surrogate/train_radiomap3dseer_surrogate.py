@@ -40,7 +40,7 @@
       --eval-only
 
 参数说明:
-  --model-type: 模型类型，pmnet / rmnet / unet / transunet / radiounet / radionet。
+  --model-type: 模型类型，pmnet / rmnet / unet / transunet / radiounet。
   --data-root: RadioMap3DSeer 数据集根目录，内部应包含 png/ 与 gain/。
   --csv-file: 可选样本 CSV；为空则自动扫描 gain/。
   --checkpoint: 评估模式或继续训练时使用的已有权重路径。
@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 # 定义配置数据类并转为字典
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -174,8 +175,13 @@ def build_config(args: argparse.Namespace) -> RadioMapTrainConfig:
 
 
 def prepare_run_dir(cfg: RadioMapTrainConfig) -> Path:
-    run_dir = Path(cfg.output_root) / cfg.run_name / cfg.param_str
-    run_dir.mkdir(parents=True, exist_ok=True)
+    base_run_dir = Path(cfg.output_root) / cfg.run_name / cfg.param_str
+    run_dir = base_run_dir
+    suffix = 1
+    while run_dir.exists():
+        run_dir = base_run_dir.parent / f"{base_run_dir.name}_{suffix:03d}"
+        suffix += 1
+    run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 
 
@@ -200,7 +206,7 @@ def evaluate(model, loader, device) -> tuple[dict[str, float], int]:
     # 关闭梯度计算，减少显存占用并提升推理效率
     with torch.no_grad():
         # _ , _：忽略附带返回的 scene_id 与 tx_id
-        for inputs, targets, _, _ in tqdm(loader, desc="Eval", leave=False):
+        for inputs, targets, _, _ in tqdm(loader, desc="Eval", leave=False, file=sys.stdout):
             inputs = inputs.to(device)
             targets = targets.to(device)
             # torch.clamp 限制输出范围在 [0,1]
@@ -330,7 +336,7 @@ def main() -> None:
             epoch_loss_total = 0.0
             epoch_samples = 0
 
-            for inputs, targets, _, _ in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.epochs}", leave=True):
+            for inputs, targets, _, _ in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.epochs}", leave=True, file=sys.stdout):
                 global_step += 1
                 inputs = inputs.to(device)
                 targets = targets.to(device)

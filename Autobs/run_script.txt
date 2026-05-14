@@ -1,45 +1,93 @@
 cd /Users/epiphanyer/Desktop/coding/paper_experiment
 
-python -m Autobs.pretrain.build_action_rank_dataset \
+# 最小回归测试
+python -m unittest Autobs.test.test_ranking_losses Autobs.test.test_env_score_shape
+
+# 第一步：构建单站点动作排序数据集
+python -m Autobs.build_action_rank_dataset \
   --dataset-path /Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight \
   --dataset-limit 512 \
   --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
   --network-type rmnet \
   --heuristic-targets-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/heuristic_targets.json \
-  --output-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_cov_se_switch.npz
+  --output-path /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_heatmap_rankloss_v2.npz
 
-python -m Autobs.pretrain.pretrain_policy \
-  --dataset /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_cov_se_switch.npz \
+# 第二步：第一阶段监督预训练
+python -m Autobs.pretrain_policy \
+  --dataset /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_heatmap_rankloss_v2.npz \
   --version single \
-  --epochs 10000 \
+  --epochs 1000 \
   --batch-size 32 \
   --lr 1e-4 \
   --val-ratio 0.1 \
   --geom-augment \
   --target-temperature 0.5 \
+  --pairwise-coeff 0.5 \
+  --reward-coeff 0.2 \
   --device mps \
-  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy_cov_se_switch
+  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/pretrained_policy_heatmap_rankloss_v2
 
-python -m Autobs.bandit.train_bandit \
-  --dataset /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_cov_se_switch.npz \
+# 查看第一阶段结果
+python - <<'PY'
+import json
+p='/Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/pretrained_policy_heatmap_rankloss_v2/pretrain_summary.json'
+obj=json.load(open(p))
+print('best_epoch:',obj['best_epoch'])
+print('best_val_loss:',obj['best_val_loss'])
+print('best_val_top1:',obj['best_val_top1'])
+print('best_val_top5:',obj['best_val_top5'])
+print('best_val_top10:',obj['best_val_top10'])
+PY
+
+# 第三步：单步约束式 rerank 微调
+python -m Autobs.train_constrained_rerank \
+  --dataset /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/action_rank_heatmap_rankloss_v2.npz \
   --version single \
-  --init-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy_cov_se_switch/best_module_state.pt \
-  --epochs 2000 \
+  --init-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/pretrained_policy_heatmap_rankloss_v2/best_module_state.pt \
+  --epochs 200 \
   --batch-size 32 \
   --lr 5e-5 \
-  --kl-coeff 0.1 \
-  --entropy-coeff 0.01 \
-  --val-ratio 0.1 \
+  --top-n 32 \
+  --coverage-margin 0.0 \
+  --coverage-penalty 8.0 \
+  --infeasible-bias 0.5 \
+  --kl-coeff 1.0 \
+  --pairwise-coeff 0.25 \
+  --reward-coeff 1.0 \
+  --reward-temperature 0.3 \
   --device mps \
-  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/bandit_policy_cov_se_switch
+  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/rerank_policy_heatmap_rankloss_v1
 
+# 查看第二阶段结果
+python - <<'PY'
+import json
+p='/Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/rerank_policy_heatmap_rankloss_v1/rerank_summary.json'
+obj=json.load(open(p))
+print('best_epoch:',obj['best_epoch'])
+print('best_val_reward_mean:',obj['best_val_reward_mean'])
+print('best_val_top1:',obj['best_val_top1'])
+print('best_val_top5:',obj['best_val_top5'])
+print('best_val_top10:',obj['best_val_top10'])
+PY
+
+# 第四步：初始化方法对比
 python -m Autobs.compare_initialization_methods \
   --maps-file /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/data/maps_test_paths_localrun.txt \
-  --methods random_init pretrain_init bandit_init run_sa run_greedy run_ga run_pso \
+  --methods random_init pretrain_init rerank_init run_sa run_greedy run_ga run_pso \
   --k-max 1 \
+  --policy-version single \
   --device mps \
   --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
-  --pretrain-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy_cov_se_switch/best_module_state.pt \
-  --bandit-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/bandit_policy_cov_se_switch/best_module_state.pt \
+  --pretrain-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/pretrained_policy_heatmap_rankloss_v2/best_module_state.pt \
+  --rerank-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/rerank_policy_heatmap_rankloss_v1/best_module_state.pt \
   --network-type rmnet \
-  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/init_compare_cov_se_switch
+  --output-dir /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/init_compare_heatmap_rankloss_v2
+
+# 查看初始化方法对比汇总
+python - <<'PY'
+import json
+p='/Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/init_compare_heatmap_rankloss_v2/summary_by_method.json'
+obj=json.load(open(p))
+for k,v in obj.items():
+    print(k,'coverage=',round(v['mean_coverage'],6),'se=',round(v['mean_spectral_efficiency'],6),'score=',round(v['mean_score'],6))
+PY

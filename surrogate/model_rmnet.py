@@ -250,6 +250,8 @@ class RMNet(nn.Module):
         d1 = self.fuse1(d2, x1)
 
         out = F.interpolate(d1, size=x.shape[2:], mode="bilinear", align_corners=False)
+        
+        # 预测重建模块
         out = torch.cat([out, x], dim=1)
         return self.input_fuse(out)
 

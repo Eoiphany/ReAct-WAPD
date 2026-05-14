@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import yaml
-
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 HEURISTIC_ROOT = ROOT_DIR.parent / "Heuristic"
@@ -46,13 +46,16 @@ PLANNER_ALIASES = {
 }
 
 
-def _resolve_model_artifacts(eval_model: str) -> tuple[str, str]:
+def _resolve_model_artifacts(eval_model: str, eval_model_path: str = "") -> tuple[str, str]:
     if eval_model == "proxy":
         raise ValueError("External Heuristic planners only support pmnet or rmnet, not proxy.")
     if eval_model not in MODEL_CFG:
         raise ValueError(f"Unsupported eval_model: {eval_model}")
-    cfg = MODEL_CFG[eval_model]
-    model_path = str((ROOT_DIR / cfg["weights_path"]).resolve())
+    if eval_model_path:
+        model_path = str(Path(eval_model_path).expanduser().resolve())
+    else:
+        cfg = MODEL_CFG[eval_model]
+        model_path = str((ROOT_DIR / cfg["weights_path"]).resolve())
     return model_path, str(eval_model)
 
 
@@ -66,6 +69,47 @@ def _target_site_count(goal: Dict[str, Any], constraints: Dict[str, Any], fallba
     return max(1, int(fallback))
 
 
+def _resolve_search_budget(requested_max_evals: int) -> int:
+    return max(1, int(requested_max_evals))
+
+
+def _load_cached_target_layout(
+    output_dir: Path,
+    max_evals: int,
+) -> tuple[list[tuple[int, int]], dict] | None:
+    layout_path = output_dir / "best_layout.npy"
+    metrics_path = output_dir / "best_metrics.json"
+    if not layout_path.exists():
+        return None
+
+    positions_xy = np.load(layout_path)
+    positions_rc: list[tuple[int, int]] = []
+    for x, y in positions_xy:
+        row = int(round(float(y)))
+        col = int(round(float(x)))
+        positions_rc.append((row, col))
+
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else {}
+    if isinstance(metrics, dict):
+        metrics["requested_max_evals"] = int(max_evals)
+        metrics["effective_max_evals"] = int(metrics.get("effective_max_evals", metrics.get("requested_max_evals", max_evals)))
+        metrics["reused_from_cache"] = True
+    return positions_rc, metrics
+
+
+def _extract_total_runtime_sec(stdout_text: str, stderr_text: str) -> float | None:
+    merged = "\n".join(part for part in [(stdout_text or "").strip(), (stderr_text or "").strip()] if part)
+    if not merged:
+        return None
+    match = re.search(r"total_runtime_sec:\s*([0-9]+(?:\.[0-9]+)?)", merged)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
 def solve_target_layout(
     planner_name: str,
     height_map_path: str,
@@ -74,10 +118,12 @@ def solve_target_layout(
     eval_model: str,
     output_dir: Path,
     fallback_k: int,
-    max_evals: int = 200,
-    candidate_stride: int = 8,
-    candidate_limit: int = 500,
+    eval_model_path: str = "",
+    max_evals: int = 100,
+    candidate_stride: int = 12,
+    candidate_limit: int = 256,
     device: str = "mps",
+    use_cache: bool = True,
 ) -> tuple[list[tuple[int, int]], dict]:
     planner_name = PLANNER_ALIASES.get(planner_name, planner_name)
     script_name = SCRIPT_MAP.get(planner_name)
@@ -92,9 +138,18 @@ def solve_target_layout(
     coverage_target = 0.95 if coverage_target is None else float(coverage_target)
     capacity_target = 0.0 if capacity_target is None else float(capacity_target)
     k_max = _target_site_count(goal, constraints, fallback=fallback_k)
-    model_path, network_type = _resolve_model_artifacts(eval_model)
+    effective_max_evals = _resolve_search_budget(max_evals)
+    model_path, network_type = _resolve_model_artifacts(eval_model, eval_model_path=eval_model_path)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    if use_cache:
+        cached = _load_cached_target_layout(output_dir, max_evals=max_evals)
+        if cached is not None:
+            positions_rc, metrics = cached
+            if isinstance(metrics, dict):
+                metrics["target_site_count"] = int(k_max)
+            return positions_rc, metrics
+
     cmd = [
         sys.executable,
         str(script_path),
@@ -116,11 +171,21 @@ def solve_target_layout(
         device,
     ]
     if planner_name != "heuristic_exhaustive":
-        cmd.extend(["--max-evals", str(max_evals)])
+        cmd.extend(["--max-evals", str(effective_max_evals)])
     if planner_name in {"heuristic_greedy", "heuristic", "heuristic_candidate_enum"}:
         cmd.extend(["--candidate-stride", str(candidate_stride), "--candidate-limit", str(candidate_limit)])
 
-    subprocess.run(cmd, check=True)
+    result = subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        details = stderr or stdout or f"exit_code={result.returncode}"
+        raise RuntimeError(f"Heuristic planner failed ({planner_name}): {details}")
 
     layout_path = output_dir / "best_layout.npy"
     metrics_path = output_dir / "best_metrics.json"
@@ -131,6 +196,15 @@ def solve_target_layout(
         col = int(round(float(x)))
         positions_rc.append((row, col))
     metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else {}
+    if isinstance(metrics, dict):
+        metrics["requested_max_evals"] = int(max_evals)
+        metrics["effective_max_evals"] = int(effective_max_evals)
+        metrics["target_site_count"] = int(k_max)
+        runtime_sec = _extract_total_runtime_sec(result.stdout or "", result.stderr or "")
+        if runtime_sec is not None:
+            metrics["search_runtime_sec"] = float(runtime_sec)
+        metrics["reused_from_cache"] = False
+        metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     return positions_rc, metrics
 
 
@@ -153,8 +227,6 @@ def _project_target_to_obs_candidates(
             rc = (int(cand.get("row")), int(cand.get("col")))
         except Exception:
             continue
-        if rc in current_set:
-            continue
         if cand.get("feasible") is False:
             continue
         feasible.append(cand)
@@ -171,6 +243,64 @@ def _project_target_to_obs_candidates(
     )
 
 
+def _project_target_layout(
+    target_layout: list[tuple[int, int]],
+    current_set: set[tuple[int, int]],
+    obs_payload: Optional[Dict[str, Any]],
+) -> list[tuple[int, int]]:
+    if not isinstance(obs_payload, dict):
+        return [(int(r), int(c)) for r, c in target_layout]
+    candidates = obs_payload.get("candidates") or []
+    if not isinstance(candidates, list):
+        return [(int(r), int(c)) for r, c in target_layout]
+
+    feasible: list[dict] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        try:
+            rc = (int(cand.get("row")), int(cand.get("col")))
+        except Exception:
+            continue
+        if cand.get("feasible") is False:
+            continue
+        feasible.append(cand)
+
+    used: set[tuple[int, int]] = set()
+    projected: list[tuple[int, int]] = []
+    for target_row, target_col in target_layout:
+        target_rc = (int(target_row), int(target_col))
+        exact = None
+        for cand in feasible:
+            rc = (int(cand["row"]), int(cand["col"]))
+            if rc in used:
+                continue
+            if rc == target_rc:
+                exact = rc
+                break
+        if exact is not None:
+            projected.append(exact)
+            used.add(exact)
+            continue
+
+        nearest = None
+        nearest_dist = None
+        for cand in feasible:
+            rc = (int(cand["row"]), int(cand["col"]))
+            if rc in used:
+                continue
+            dist = (rc[0] - target_rc[0]) ** 2 + (rc[1] - target_rc[1]) ** 2
+            if nearest is None or dist < nearest_dist:
+                nearest = rc
+                nearest_dist = dist
+        if nearest is not None:
+            projected.append(nearest)
+            used.add(nearest)
+        else:
+            projected.append(target_rc)
+    return projected
+
+
 def next_action_from_target_layout(
     env,
     target_layout: list[tuple[int, int]],
@@ -178,10 +308,40 @@ def next_action_from_target_layout(
 ) -> Dict[str, Any]:
     current_locs = list(env.tx_locs)
     current_set = {(int(r), int(c)) for r, c in current_locs}
-    target_set = {(int(r), int(c)) for r, c in target_layout}
+    projected_layout = _project_target_layout(target_layout, current_set, obs_payload)
+    target_set = {(int(r), int(c)) for r, c in projected_layout}
+    site_exact = env.constraints.get("site_exact")
+    site_limit = env.constraints.get("site_limit")
+    site_limit = None if site_limit is None else int(site_limit)
 
-    missing = [site for site in target_layout if (int(site[0]), int(site[1])) not in current_set]
+    missing = [site for site in projected_layout if (int(site[0]), int(site[1])) not in current_set]
     extra = [site for site in current_locs if (int(site[0]), int(site[1])) not in target_set]
+
+    # 固定站点模式下，启发式回放只补点，不做 move/remove 修补；达到精确站点数后直接结束。
+    if site_exact is not None:
+        if len(current_locs) < int(site_exact) and missing:
+            row, col = missing[0]
+            z_m = float(env.pixel_map[int(row), int(col)] * (19.8 - 6.6) + 6.6 + 3.0)
+            return {"name": "Propose", "args": {"sites": [{"row": int(row), "col": int(col), "z_m": z_m}], "mode": "add"}}
+
+        metrics = env._evaluate()
+        return {
+            "name": "Finish",
+            "args": {
+                "final_site_set": [
+                    {"row": int(r), "col": int(c), "z_m": float(env.pixel_map[int(r), int(c)] * (19.8 - 6.6) + 6.6 + 3.0)}
+                    for r, c in current_locs
+                ],
+                "metrics": {"coverage": float(metrics.coverage), "capacity": float(metrics.capacity)},
+            },
+        }
+
+    # 非固定站点模式下，若当前站点数仍少于目标布局规模，且未触及 site_limit，
+    # 则优先补点；这样可以避免把初始化站点先 move 掉导致站点数长期偏低。
+    if missing and (site_limit is None or len(current_locs) < site_limit) and len(current_locs) < len(projected_layout):
+        row, col = missing[0]
+        z_m = float(env.pixel_map[int(row), int(col)] * (19.8 - 6.6) + 6.6 + 3.0)
+        return {"name": "Propose", "args": {"sites": [{"row": int(row), "col": int(col), "z_m": z_m}], "mode": "add"}}
 
     if extra and missing:
         extra_site = extra[0]
@@ -189,14 +349,8 @@ def next_action_from_target_layout(
         row, col = missing[0]
         return {"name": "Refine", "args": {"rule_or_delta": {"op": "move", "id": int(extra_idx), "row": int(row), "col": int(col)}}}
     if missing:
-        chosen = _project_target_to_obs_candidates(missing[0], current_set, obs_payload)
-        if chosen is not None:
-            row = int(chosen["row"])
-            col = int(chosen["col"])
-            z_m = float(chosen.get("z_m", env.pixel_map[row, col] * (19.8 - 6.6) + 6.6 + 3.0))
-        else:
-            row, col = missing[0]
-            z_m = float(env.pixel_map[int(row), int(col)] * (19.8 - 6.6) + 6.6 + 3.0)
+        row, col = missing[0]
+        z_m = float(env.pixel_map[int(row), int(col)] * (19.8 - 6.6) + 6.6 + 3.0)
         return {"name": "Propose", "args": {"sites": [{"row": int(row), "col": int(col), "z_m": z_m}], "mode": "add"}}
     if extra:
         extra_site = extra[0]

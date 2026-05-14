@@ -1,0 +1,13 @@
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/658.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/666.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/672.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/674.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/677.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/678.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/686.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/690.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/691.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/693.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/694.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/695.png
+/Users/epiphanyer/Desktop/coding/paper_experiment/dataset/png/buildingsWHeight/697.png

@@ -8,31 +8,12 @@ usc-data/
 /Autobs/__pycache__/
 /Autobs/.cache/
 /Autobs/.mplconfig/
-/Autobs/checkpoints/
-/Autobs/env/__pycache__/
-/Autobs/env/__init__.py
-/Autobs/models/PMNet.pt
-/Autobs/models/RMNet.pt
-/Autobs/models/__init__.py
-/Autobs/models/__pycache__/
+/Autobs/models/
 /Autobs/outputs/
-/Autobs/rl_module/__pycache__/
-/Autobs/rl_module/__init__.py
-!/Autobs/test/
-/Autobs/test/*
-!/Autobs/test/test_env_score_shape.py
-/Autobs/__init__.py
-/Autobs/pretrained_policy/
-/Autobs/pretrained_policy_val/
-/Autobs/checkpoints_score_v2_pretrained/
-/Autobs/checkpoints_zonghe/
-/Autobs/checkpoints_score/
-/Autobs/bandit_policy/
-/Autobs/bandit_policy_cov_se_switch/
-/Autobs/pretrained_policy/
-/Autobs/pretrained_policy_val/
-/Autobs/pretrained_policy_cov_se_switch/
+/Autobs/test/
+/Autobs/vis/
 
+/RadioMapSeer/
 /dataset/
 
 /Heuristic/__pycache__/
@@ -43,6 +24,8 @@ usc-data/
 /Heuristic/model/
 /Heuristic/outputs/
 /Heuristic/test/
+/ReAct/plot/
+
 
 /Qwen/
 
@@ -50,6 +33,11 @@ usc-data/
 /ReAct/test/
 /ReAct/vis/
 /ReAct/outputs/
+/ReAct/exp/
+/ReAct/runs/
+/ReAct/checkpoints/
+
+
 /ReAct/__init__.py
 
 /surrogate/__pycache__/
@@ -62,9 +50,14 @@ usc-data/
 /surrogate/blender_scene/paris/output_dataset/
 /surrogate/blender_scene/paris/README.md
 /surrogate/checkpoints/
+/surrogate/case_study/output_dataset/
+/surrogate/case_study/search_runs/
 /surrogate/test/
 /surrogate/output_pred/
 /surrogate/plots/
 /surrogate/all_model_summary/
 /surrogate/runs/
 /surrogate/vis/
+
+/visualization/test/
+/visualization/runtime/

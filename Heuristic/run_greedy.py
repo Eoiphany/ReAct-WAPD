@@ -192,8 +192,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         help="Receiver noise coefficient in dB; total noise power is computed in code",
     )
-    parser.add_argument("--candidate-stride", default=8, type=int, help="Grid stride when sampling candidate sites")
-    parser.add_argument("--candidate-limit", default=5000, type=int, help="Maximum number of candidate sites to keep")
+    parser.add_argument("--candidate-stride", default=12, type=int, help="Grid stride when sampling candidate sites")
+    parser.add_argument("--candidate-limit", default=256, type=int, help="Maximum number of candidate sites to keep")
     return parser.parse_args()
 
 

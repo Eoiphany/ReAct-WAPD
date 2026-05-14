@@ -82,7 +82,7 @@ def build_candidates(pixel_map: np.ndarray) -> List[Dict[str, Any]]:
     action_ids = np.where(action_mask > 0.5)[0]
     candidates: List[Dict[str, Any]] = []
     for aid in action_ids:
-        row, col = calc_upsampling_loc(int(aid))
+        row, col = calc_upsampling_loc(int(aid), pixel_map)
         gray = float(pixel_map[row, col])
         candidates.append(
             {
@@ -192,7 +192,6 @@ class RadioMapEnv(gym.Env):
 
         target_cov = self.goal.get("targets", {}).get("coverage_pct")
         target_cap = self.goal.get("targets", {}).get("capacity")
-        # redundancy_rate字段由两部分组成
         redundancy_target = normalize_redundancy_target(self.goal.get("targets", {}).get("redundancy_rate"))
         site_count_status = evaluate_site_count_constraints(self.constraints, len(self.tx_locs))
         cov_gap = None if metrics is None or target_cov is None else float(target_cov) - metrics["coverage"]
@@ -216,8 +215,6 @@ class RadioMapEnv(gym.Env):
             miss_type.append("coverage_shortfall")
         if cap_gap is not None and cap_gap > 0:
             miss_type.append("capacity_shortfall")
-        if red_gap is not None and red_gap > 0:
-            miss_type.append(f"redundancy_{red_state}")
         if site_over is not None and site_over > 0:
             miss_type.append("site_over_limit")
         if site_count_status["site_exact"] is not None and site_gap is not None and site_gap > 0:
@@ -226,7 +223,14 @@ class RadioMapEnv(gym.Env):
         payload = {
             "state": {
                 "site_count": len(self.tx_locs),
-                "sites": [{"row": int(r), "col": int(c), "z_m": float(height_from_gray(self.pixel_map[r, c]))} for r, c in self.tx_locs],
+                "sites": [
+                    {
+                        "row": int(r),
+                        "col": int(c),
+                        "z_m": float(height_from_gray(self.pixel_map[r, c])),
+                    }
+                    for r, c in self.tx_locs
+                ],
                 "last_metrics": metrics,
             },
             "user_request": self.user_request,
@@ -342,11 +346,12 @@ class RadioMapEnv(gym.Env):
                 self.tx_locs = final_locs
             metrics = self._evaluate()
             reward = metrics.coverage
-            done = self._is_done(metrics)
-            if not done:
+            done = True
+            if not self._is_done(metrics):
                 info["error"] = "finish_before_target"
             obs = json.dumps(self._payload(), ensure_ascii=True)
             self.steps += 1
+            info["steps"] = self.steps
             return obs, reward, done, False, info
         else:
             info["error"] = "unknown_action"
@@ -357,6 +362,7 @@ class RadioMapEnv(gym.Env):
         done = self._is_done(metrics)
         obs = json.dumps(self._payload(), ensure_ascii=True)
         self.steps += 1
+        info["steps"] = self.steps
         return obs, reward, done, False, info
 
 if __name__ == "__main__":

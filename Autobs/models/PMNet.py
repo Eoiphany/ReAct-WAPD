@@ -1,15 +1,13 @@
 """注释
 命令:
-- `Python -m Autobs.train_ppo`
+- `Python -m Autobs.pretrain_policy`
 
 参数含义:
 - 训练环境奖励推理默认会加载 `Autobs/models/PMNet.py` 与 `Autobs/models/PMNet.pt`。
-- 本文件保持旧 PMNet 网络结构不变，只迁入项目内供 PPO 训练调用。
+- 本文件保持旧 PMNet 网络结构不变，只迁入项目内供策略学习主线调用。
 """
 
 from __future__ import absolute_import, print_function
-
-from collections import OrderedDict
 
 import torch
 import torch.nn as nn

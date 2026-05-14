@@ -38,8 +38,23 @@ import torch
 import torch.nn as nn
 
 
-LATIN_FONT_FAMILY = "Times New Roman"
-CHINESE_FONT_CANDIDATES = ("SimSun", "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC")
+LATIN_FONT_CANDIDATES = (
+    "Times New Roman",
+    "Nimbus Roman",
+    "DejaVu Serif",
+    "Liberation Serif",
+)
+CHINESE_FONT_CANDIDATES = (
+    "SimSun",
+    "Songti SC",
+    "STSong",
+    "Noto Serif CJK SC",
+    "Noto Sans CJK SC",
+    "Source Han Serif SC",
+    "Source Han Sans SC",
+    "Microsoft YaHei",
+    "WenQuanYi Zen Hei",
+)
 ACADEMIC_COLOR_CYCLE = ("#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b")
 METRIC_DISPLAY_NAMES = {
     "train_loss": "Train Loss",
@@ -115,9 +130,10 @@ def configure_plot_style() -> dict[str, str | None]:
     from matplotlib import font_manager
 
     available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+    latin_font = next((candidate for candidate in LATIN_FONT_CANDIDATES if candidate in available_fonts), "DejaVu Serif")
     chinese_font = next((candidate for candidate in CHINESE_FONT_CANDIDATES if candidate in available_fonts), None)
 
-    font_family = [LATIN_FONT_FAMILY]
+    font_family = [latin_font]
     if chinese_font is not None:
         font_family.append(chinese_font)
 
@@ -128,6 +144,11 @@ def configure_plot_style() -> dict[str, str | None]:
             "axes.unicode_minus": False,
             "figure.dpi": 150,
             "savefig.dpi": 300,
+            "savefig.facecolor": "white",
+            "savefig.edgecolor": "white",
+            "svg.fonttype": "none",
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
             "legend.frameon": False,
             "legend.fontsize": 10,
             "axes.spines.top": False,
@@ -145,7 +166,7 @@ def configure_plot_style() -> dict[str, str | None]:
             "axes.prop_cycle": matplotlib.cycler(color=list(ACADEMIC_COLOR_CYCLE)),
         }
     )
-    return {"latin_font": LATIN_FONT_FAMILY, "chinese_font": chinese_font}
+    return {"latin_font": latin_font, "chinese_font": chinese_font}
 
 
 def compute_regression_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:

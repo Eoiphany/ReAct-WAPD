@@ -11,11 +11,11 @@ python -m surrogate.plot_run_histories \
 
 参数说明:
 - --runs-root: 训练结果根目录，内部应包含 `pmnet_usc/16_...` 这类实验目录。
-- --output-root: 聚合曲线图输出目录，脚本会写入 8 张 PNG 图。
+- --output-root: 聚合曲线图输出目录，脚本会为每个数据集写入 1 张 2×2 总览 PNG 图。
 
 脚本逻辑:
 - 扫描 `surrogate/runs` 下 5 个模型在 USC 与 RadioMap3DSeer 上的 `history.json`。
-- 按数据集分别生成 8 张总览图：`USC` 与 `RadioMap3DSeer` 各输出 Train Loss、Best Validation RMSE、Validation MAE、Validation R²。
+- 按数据集分别生成 2 张 2×2 总览图：每张图内统一展示 Train Loss、Best Validation RMSE、Validation MAE、Validation R²。
 - 保持学术风格绘图，并遵守“中文宋体、西文 Times New Roman”的既有字体约束。
 """
 
@@ -60,6 +60,8 @@ HIGH_CONTRAST_COLORS = {
     "radiounet": "#E45756",
 }
 BEST_MARKER_METRICS = {"best_val_rmse", "val_mae", "val_r2"}
+PUBLICATION_DPI = 450
+VECTOR_EXPORT_SUFFIXES = (".svg",)
 
 try:
     from .utils import ACADEMIC_COLOR_CYCLE, configure_plot_style
@@ -207,7 +209,13 @@ def annotate_rmnet_best(ax: Any, xs: list[int], ys: list[float], metric_key: str
     ax.annotate(
         value_text,
         xy=(best_x, best_y),
-        xytext=(14, 10 if metric_key == "val_r2" else -16),
+        xytext=(
+            (14, 10)
+            if metric_key == "val_r2"
+            else (18, -18)
+            if metric_key == "best_val_rmse"
+            else (-72, -22)
+        ),
         textcoords="offset points",
         fontsize=11,
         color=color,
@@ -225,6 +233,35 @@ def filter_run_histories_by_dataset(run_histories: list[RunHistory], dataset: st
     时间: 2026-04-26。
     """
     return [run_history for run_history in run_histories if run_history.dataset == dataset]
+
+
+def save_publication_figure(fig: Any, output_path: Path) -> list[Path]:
+    """
+    功能: 以投稿/文档友好的方式同时导出位图与矢量版本，避免 Word 中仅依赖 PNG 时缩放失真。
+    输入: `fig` 为 matplotlib 图对象，`output_path` 为主输出路径（通常是 `.png`）。
+    输出: `list[Path]`，包含实际写出的文件路径，首项为主输出路径。
+    示例: `save_publication_figure(fig, Path('usc_training_validation_overview.png'))`。
+    时间: 2026-04-30。
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    saved_paths = [output_path]
+    fig.savefig(
+        output_path,
+        bbox_inches="tight",
+        dpi=PUBLICATION_DPI,
+        facecolor="white",
+        edgecolor="white",
+    )
+    for suffix in VECTOR_EXPORT_SUFFIXES:
+        companion_path = output_path.with_suffix(suffix)
+        fig.savefig(
+            companion_path,
+            bbox_inches="tight",
+            facecolor="white",
+            edgecolor="white",
+        )
+        saved_paths.append(companion_path)
+    return saved_paths
 
 
 def plot_metric_figure(run_histories: list[RunHistory], dataset: str, metric_key: str, title: str, ylabel: str, output_path: Path) -> None:
@@ -306,35 +343,103 @@ def plot_metric_figure(run_histories: list[RunHistory], dataset: str, metric_key
     legend.get_frame().set_linewidth(1.0)
 
     fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
+    save_publication_figure(fig, output_path)
+    plt.close(fig)
+
+
+def plot_dataset_overview(run_histories: list[RunHistory], dataset: str, output_path: Path) -> None:
+    """
+    功能: 为单个数据集生成一张 2×2 组合图，统一展示训练损失与验证指标。
+    输入: `run_histories` 为全部实验历史，`dataset` 为目标数据集键名，`output_path` 为 PNG 路径。
+    输出: 无，副作用是在 `output_path` 写出组合图文件。
+    示例: `plot_dataset_overview(histories, 'usc', Path('usc_training_validation_overview.png'))`。
+    时间: 2026-04-27。
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    configure_plot_style()
+    import matplotlib.pyplot as plt
+
+    dataset_histories = filter_run_histories_by_dataset(run_histories, dataset)
+    color_map = get_color_map()
+    fig, axes = plt.subplots(2, 2, figsize=(13.6, 9.2))
+    axes_flat = axes.flatten()
+
+    for ax, (metric_key, metric_title, ylabel, _file_stub) in zip(axes_flat, PLOT_SPECS):
+        ax.set_facecolor("#FFFFFF")
+        ax.minorticks_on()
+        ax.grid(True, which="major", color="#C9D1D9", linestyle="--", linewidth=0.8, alpha=0.55)
+        ax.grid(True, which="minor", color="#E5E7EB", linestyle="-", linewidth=0.35, alpha=0.55)
+
+        for run_history in dataset_histories:
+            xs = [int(row["epoch"]) for row in run_history.history if row.get("epoch") is not None and row.get(metric_key) is not None]
+            ys = [float(row[metric_key]) for row in run_history.history if row.get("epoch") is not None and row.get(metric_key) is not None]
+            if not xs:
+                continue
+
+            color = color_map[run_history.model_type]
+            label = MODEL_DISPLAY_NAMES[run_history.model_type]
+            smooth_ys = compute_smooth_curve(ys, window=5 if metric_key == "train_loss" else 3)
+
+            ax.plot(xs, ys, color=color, linewidth=1.0, alpha=0.18, linestyle="-", zorder=1)
+            ax.plot(
+                xs,
+                smooth_ys,
+                label=label,
+                color=color,
+                linestyle="-",
+                marker="s" if run_history.model_type == "rmnet" else "o",
+                markevery=max(1, len(xs) // 8),
+                linewidth=3.0 if run_history.model_type == "rmnet" and metric_key in BEST_MARKER_METRICS else 2.3,
+                markersize=6.0 if run_history.model_type == "rmnet" else 4.8,
+                alpha=0.98,
+                zorder=4 if run_history.model_type == "rmnet" else 3,
+            )
+            if run_history.model_type == "rmnet":
+                annotate_rmnet_best(ax, xs, ys, metric_key, color)
+
+        ax.set_title(metric_title)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(ylabel)
+
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    if handles:
+        legend = fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            ncol=len(handles),
+            frameon=True,
+            fancybox=True,
+            framealpha=0.95,
+            bbox_to_anchor=(0.5, 0.955),
+            title="Architecture",
+            borderpad=0.5,
+            handlelength=2.2,
+        )
+        legend.get_frame().set_edgecolor("#B8B8B8")
+        legend.get_frame().set_linewidth(1.0)
+
+    fig.suptitle(f"{DATASET_DISPLAY_NAMES[dataset]} Training and Validation Overview", fontsize=15, y=0.985)
+    fig.subplots_adjust(top=0.84, bottom=0.08, left=0.07, right=0.98, hspace=0.28, wspace=0.18)
+    save_publication_figure(fig, output_path)
     plt.close(fig)
 
 
 def export_all_figures(run_histories: list[RunHistory], output_root: Path) -> list[Path]:
     """
-    功能: 按预设的 4 个指标为两个数据集批量导出总览图。
+    功能: 为两个数据集各导出一张 2×2 训练/验证组合总览图。
     输入: `run_histories` 为所有实验历史，`output_root` 为图像输出目录。
-    输出: `list[Path]`，包含已写出的 8 张图路径。
+    输出: `list[Path]`，包含已写出的 2 张图路径。
     示例: `export_all_figures(histories, Path('paper_experiment/surrogate/plots'))`。
-    时间: 2026-04-26。
+    时间: 2026-04-27。
     """
     exported_paths: list[Path] = []
     for dataset in DATASET_ORDER:
-        dataset_display_name = DATASET_DISPLAY_NAMES[dataset]
-        for metric_key, metric_title, ylabel, file_stub in PLOT_SPECS:
-            file_name = f"{dataset}_{file_stub}_all_models.png"
-            title = f"{dataset_display_name} {metric_title}"
-            output_path = output_root / file_name
-            plot_metric_figure(
-                run_histories,
-                dataset=dataset,
-                metric_key=metric_key,
-                title=title,
-                ylabel=ylabel,
-                output_path=output_path,
-            )
-            exported_paths.append(output_path)
+        output_path = output_root / f"{dataset}_training_validation_overview.png"
+        plot_dataset_overview(run_histories, dataset, output_path)
+        exported_paths.append(output_path)
     return exported_paths
 
 

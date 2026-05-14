@@ -41,7 +41,7 @@
       --eval-split val
       
 参数说明:
-  --model-type: 模型类型，pmnet / rmnet / unet / transunet / radiounet / radionet。
+  --model-type: 模型类型，pmnet / rmnet / unet / transunet / radiounet。
   --data-root: USC 数据集根目录，内部应包含 map/、Tx/、pmap/。
   --csv-file: 可选样本列表 CSV；训练时为空则自动读 Data_coarse_train.csv 或扫描 pmap/。
   --checkpoint: 评估模式或继续训练时使用的已有权重路径。
@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -170,8 +171,13 @@ def build_config(args: argparse.Namespace) -> USCTrainConfig:
 
 
 def prepare_run_dir(cfg: USCTrainConfig) -> Path:
-    run_dir = Path(cfg.output_root) / cfg.run_name / cfg.param_str
-    run_dir.mkdir(parents=True, exist_ok=True)
+    base_run_dir = Path(cfg.output_root) / cfg.run_name / cfg.param_str
+    run_dir = base_run_dir
+    suffix = 1
+    while run_dir.exists():
+        run_dir = base_run_dir.parent / f"{base_run_dir.name}_{suffix:03d}"
+        suffix += 1
+    run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 
 
@@ -224,7 +230,7 @@ def evaluate(model, loader, device) -> tuple[dict[str, float], int]:
     totals = {"rmse": 0.0, "mse": 0.0, "mae": 0.0, "r2": 0.0}
     total_samples = 0
     with torch.no_grad():
-        for inputs, targets in tqdm(loader, desc="Eval", leave=False):
+        for inputs, targets in tqdm(loader, desc="Eval", leave=False, file=sys.stdout):
             inputs = inputs.to(device)
             targets = targets.to(device)
             preds = torch.clamp(select_prediction(model(inputs)), 0, 1)
@@ -346,7 +352,7 @@ def main() -> None:
             epoch_loss_total = 0.0
             epoch_samples = 0
 
-            for inputs, targets in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.num_epochs}", leave=True):
+            for inputs, targets in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.num_epochs}", leave=True, file=sys.stdout):
                 global_step += 1
                 inputs = inputs.to(device)
                 targets = targets.to(device)

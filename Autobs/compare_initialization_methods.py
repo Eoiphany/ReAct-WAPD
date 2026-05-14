@@ -5,12 +5,12 @@ cd autodl-tmp/code/
 
 python Autobs/compare_initialization_methods.py \
   --maps-file /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/data/maps_test_paths_localrun.txt \
-  --methods random_init pretrain_init bandit_init run_sa run_greedy run_ga run_pso \
+  --methods random_init pretrain_init rerank_init run_sa run_greedy run_ga run_pso \
   --k-max 1 \
   --device mps \
   --model-path /Users/epiphanyer/Desktop/coding/paper_experiment/surrogate/checkpoints/rmnet_radiomap3dseer.pt \
   --pretrain-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/pretrained_policy/best_module_state.pt \
-  --bandit-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/bandit_policy/best_module_state.pt \
+  --rerank-module-state /Users/epiphanyer/Desktop/coding/paper_experiment/Autobs/outputs/rerank_policy/best_module_state.pt \
   --network-type rmnet \
   --output-dir Autobs/outputs/init_comparev4
 
@@ -22,14 +22,13 @@ python Autobs/compare_initialization_methods.py \
 
 参数说明:
 - --maps-file: 地图路径清单文件；默认读取 `ReAct/data/maps_test_paths_localrun.txt`。
-- --methods: 要对比的方法集合。推荐使用 `random_init`、`ppo_init`、`run_sa`、`run_greedy`、`run_ga`、`run_pso`、
+- --methods: 要对比的方法集合。推荐使用 `random_init`、`pretrain_init`、`rerank_init`、`run_sa`、`run_greedy`、`run_ga`、`run_pso`、
   `run_candidate_enumeration`、`run_exhaustive_search`；旧名字 `run_bruteforce`、`run_full_enumeration` 仍兼容并会自动归一化。
 - --map-limit: 可选，仅跑前 N 张图，便于 smoke test。
 - --k-max: 每张图部署的站点数。
 - --model-path: 统一评估 surrogate 权重路径，同时传给启发式脚本。
 - --network-type: surrogate 模型类型，支持 `pmnet`、`pmnet_v3`、`rmnet`、`rmnet_v3`。v3是输出维度不一样，我们使用普通版本即可。
-- --ppo-checkpoint: PPO checkpoint 路径；当 `methods` 包含 `ppo_init` 时必需。
-- --ppo-version: `auto/single/multi`。`auto` 会在 `k-max=1` 时走单站点观测，否则走多站点观测。
+- --policy-version: 当前仅保留 `single/auto`，二阶段初始化只支持单站点观测。
 - --device: 推理设备，`auto/cpu/cuda/mps`。
 - --output-dir: 输出目录；会保存逐图记录、按方法汇总均值和失败日志。
 - --coverage-target / --spectral-efficiency-target: 与现有启发式脚本一致的目标值。
@@ -45,10 +44,9 @@ python Autobs/compare_initialization_methods.py \
   避免在 `Autobs` 内部再复制一版启发式实现。
 - 对 `random_init`，脚本在动作网格的合法位置中均匀随机采样 `k-max` 个不重复动作，并用 `Autobs.env.utils.get_stats`
   计算覆盖率、平均频谱效率、平均信道容量、冗余率和 score。
-- 对 `ppo_init`，脚本复用现有 PPO checkpoint 加载逻辑，按单站点或多站点观测顺序依次选点，再用同一套指标函数统一评估。
 - 最终输出 `all_records.csv/json`、`summary_by_method.csv/json` 和 `failures.json`，其中 summary 给出每种方法在整份测试图上的平均覆盖率、
   平均信道容量、平均频谱效率、平均冗余率和平均 score。
-- 现在脚本是“随机和 PPO 只做汇总，不做单方法目录落盘；启发式才有单独文件夹”。
+- 现在脚本是“随机和模块状态初始化只做汇总，不做单方法目录落盘；启发式才有单独文件夹”。
 """
 
 from __future__ import annotations
@@ -56,8 +54,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
-import pickle
 import subprocess
 import sys
 import time
@@ -73,7 +69,7 @@ if __package__ in {None, ""}:
     if str(_PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(_PACKAGE_PARENT))
 
-from Autobs.env.utils import (
+from Autobs.utils import (
     calc_action_mask,
     calc_upsampling_loc,
     CHANNEL_BANDWIDTH_HZ,
@@ -91,11 +87,9 @@ from Autobs.env.utils import (
     get_site_pathgain_maps,
     load_map_normalized,
 )
-from Autobs.paths import CHECKPOINT_DIR, DEFAULT_RMNET_WEIGHTS, PACKAGE_ROOT, PROJECT_ROOT
-from Autobs.pmnet_adapter import infer_pmnet
-from Autobs.pretrain.pretrain_policy import build_policy_module, forward_masked_logits
-from Autobs.run_checkpoint_rmnet_viz import compute_checkpoint_action, load_checkpoint_agent, load_pickle_state
-from Autobs.train_ppo import apply_module_state, load_module_state
+from Autobs.paths import DEFAULT_RMNET_WEIGHTS, PACKAGE_ROOT, PROJECT_ROOT
+from Autobs.pretrain_policy import build_policy_module, forward_masked_logits
+from Autobs.utils import apply_module_state, load_module_state
 
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 HEURISTIC_DIR = PROJECT_ROOT / "Heuristic"
@@ -103,9 +97,8 @@ DEFAULT_MAPS_FILE = WORKSPACE_ROOT / "ReAct" / "data" / "maps_test_paths_localru
 DEFAULT_OUTPUT_DIR = PACKAGE_ROOT / "outputs" / "init_compare"
 METHOD_CHOICES = (
     "random_init",
-    "ppo_init",
     "pretrain_init",
-    "bandit_init",
+    "rerank_init",
     "run_sa",
     "run_greedy",
     "run_ga",
@@ -115,7 +108,7 @@ METHOD_CHOICES = (
     "run_bruteforce",
     "run_full_enumeration",
 )
-DEFAULT_METHODS = ("random_init", "ppo_init", "run_sa", "run_greedy", "run_ga", "run_pso")
+DEFAULT_METHODS = ("random_init", "pretrain_init", "rerank_init", "run_sa", "run_greedy", "run_ga", "run_pso")
 NETWORK_CHOICES = ("pmnet", "pmnet_v3", "rmnet", "rmnet_v3")
 ROI_COUNT_THRESHOLDS = (1, 2)
 OUTPUT_HEIGHT_MIN_M = 9.6
@@ -125,7 +118,7 @@ METHOD_ALIASES = {
     "run_bruteforce": "run_candidate_enumeration",
     "run_full_enumeration": "run_exhaustive_search",
 }
-MODULE_RERANK_TOP_N = 8
+MODULE_RERANK_TOP_N = 32
 MODULE_RERANK_COVERAGE_WINDOW = 0.01
 HEURISTIC_SCRIPT_BY_METHOD = {
     "run_sa": HEURISTIC_DIR / "run_sa.py",
@@ -138,18 +131,16 @@ HEURISTIC_SCRIPT_BY_METHOD = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Compare heuristic / random / PPO initialization methods on a map list.")
+    parser = argparse.ArgumentParser(description="Compare heuristic / random / pretrain initialization methods on a map list.")
     parser.add_argument("--maps-file", default=str(DEFAULT_MAPS_FILE), type=str)
     parser.add_argument("--methods", nargs="+", default=list(DEFAULT_METHODS), choices=METHOD_CHOICES)
     parser.add_argument("--map-limit", type=int)
     parser.add_argument("--k-max", default=2, type=int)
     parser.add_argument("--model-path", default=str(DEFAULT_RMNET_WEIGHTS), type=str)
     parser.add_argument("--network-type", default="rmnet", choices=NETWORK_CHOICES)
-    parser.add_argument("--ppo-checkpoint", default=str(CHECKPOINT_DIR), type=str)
-    parser.add_argument("--ppo-version", default="auto", choices=["auto", "single", "multi"])
     parser.add_argument("--pretrain-module-state", default="", type=str)
-    parser.add_argument("--bandit-module-state", default="", type=str)
-    parser.add_argument("--policy-version", default="auto", choices=["auto", "single", "multi"])
+    parser.add_argument("--rerank-module-state", default="", type=str)
+    parser.add_argument("--policy-version", default="auto", choices=["auto", "single"])
     parser.add_argument("--device", default="cuda", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), type=str)
     parser.add_argument("--coverage-target", default=DEFAULT_COVERAGE_TARGET, type=float)
@@ -333,7 +324,7 @@ def _mask_selected_actions(action_mask: np.ndarray, selected_actions: list[int])
     return masked
 
 
-def build_ppo_observation(
+def build_policy_observation(
     pixel_map: np.ndarray,
     tx_locs: list[tuple[int, int]],
     selected_actions: list[int],
@@ -341,82 +332,11 @@ def build_ppo_observation(
     coverage_threshold_db: float,
 ) -> dict[str, np.ndarray]:
     action_mask = _mask_selected_actions(calc_action_mask(pixel_map).astype(np.float32), selected_actions)
-    if version == "single":
-        obs = np.clip(pixel_map.reshape(-1), 0.0, 1.0).astype(np.float32)
-        return {"observations": obs, "action_mask": action_mask}
-    if version != "multi":
-        raise ValueError(f"Unsupported PPO version: {version}")
+    if version != "single":
+        raise ValueError(f"Unsupported policy version: {version}")
+    obs = np.clip(pixel_map.reshape(-1), 0.0, 1.0).astype(np.float32)
+    return {"observations": obs, "action_mask": action_mask}
 
-    if not tx_locs:
-        obs = np.tile(pixel_map.reshape(-1), 2).astype(np.float32)
-    else:
-        site_pathgain_db = get_site_pathgain_maps(pixel_map, tx_locs, pmnet=infer_pmnet)
-        strongest_pathgain_db = np.max(site_pathgain_db, axis=0).astype(np.float32)
-        strongest_rx_power_dbm = TX_POWER_DBM + strongest_pathgain_db
-        covered = (strongest_rx_power_dbm >= coverage_threshold_db).astype(np.float32)
-        obs = np.concatenate((pixel_map, covered), axis=None).astype(np.float32)
-    return {"observations": np.clip(obs, 0.0, 1.0).astype(np.float32), "action_mask": action_mask}
-
-
-def select_ppo_layout(
-    *,
-    pixel_map: np.ndarray,
-    checkpoint_path: str,
-    k_max: int,
-    ppo_version: str,
-    coverage_threshold_db: float,
-) -> tuple[list[int], list[tuple[int, int]]]:
-    version = ppo_version
-    if version == "auto":
-        version = infer_ppo_observation_version(checkpoint_path)
-
-    agent = load_checkpoint_agent(checkpoint_path)
-    selected_actions: list[int] = []
-    tx_locs: list[tuple[int, int]] = []
-    try:
-        for _ in range(k_max):
-            observation = build_ppo_observation(
-                pixel_map=pixel_map,
-                tx_locs=tx_locs,
-                selected_actions=selected_actions,
-                version=version,
-                coverage_threshold_db=coverage_threshold_db,
-            )
-            if float(np.sum(observation["action_mask"])) <= 0.0:
-                raise RuntimeError("PPO observation action mask contains no legal actions")
-            action = int(compute_checkpoint_action(agent, observation, explore=False))
-            if observation["action_mask"][action] <= 0.0:
-                raise RuntimeError(f"PPO selected an illegal or repeated action: {action}")
-            selected_actions.append(action)
-            tx_locs.append(calc_upsampling_loc(action, pixel_map))
-    finally:
-        stop = getattr(agent, "stop", None)
-        if callable(stop):
-            stop()
-    return selected_actions, tx_locs
-
-
-def infer_ppo_observation_version(checkpoint_path: str | Path) -> str:
-    checkpoint_dir = Path(checkpoint_path).expanduser().resolve()
-    module_state_path = checkpoint_dir / "learner_group" / "learner" / "rl_module" / "default_policy" / "module_state.pkl"
-    if not module_state_path.exists():
-        return "multi"
-
-    with module_state_path.open("rb") as handle:
-        state = load_pickle_state(handle)
-    if not isinstance(state, dict):
-        return "multi"
-
-    for key, value in state.items():
-        if key.endswith("encoder.actor_encoder.net.mlp.0.weight") or key.endswith("actor_encoder.net.mlp.0.weight"):
-            weight = np.asarray(value)
-            if weight.ndim == 2:
-                input_dim = int(weight.shape[1])
-                if input_dim == 256 * 256:
-                    return "single"
-                if input_dim == 2 * 256 * 256:
-                    return "multi"
-    return "multi"
 
 
 def infer_module_state_observation_version(module_state_path: str | Path) -> str:
@@ -428,8 +348,6 @@ def infer_module_state_observation_version(module_state_path: str | Path) -> str
             in_channels = int(weight.shape[1])
             if in_channels == 1:
                 return "single"
-            if in_channels == 2:
-                return "multi"
     for key, value in state.items():
         if key.endswith("encoder.actor_encoder.net.mlp.0.weight") or key.endswith("actor_encoder.net.mlp.0.weight"):
             weight = np.asarray(value)
@@ -437,8 +355,6 @@ def infer_module_state_observation_version(module_state_path: str | Path) -> str
                 input_dim = int(weight.shape[1])
                 if input_dim == 256 * 256:
                     return "single"
-                if input_dim == 2 * 256 * 256:
-                    return "multi"
     return "single"
 
 
@@ -461,14 +377,6 @@ def load_module_policy(module_state_path: str | Path, version: str, device_name:
     module.to(device)
     module.eval()
     return module
-
-
-def compute_module_action(module, observation: dict[str, np.ndarray], explore: bool = False) -> int:
-    logits = compute_module_logits(module, observation)
-    if explore:
-        dist = torch.distributions.Categorical(logits=logits)
-        return int(dist.sample().item())
-    return int(torch.argmax(logits).item())
 
 
 def compute_module_logits(module, observation: dict[str, np.ndarray]) -> torch.Tensor:
@@ -563,7 +471,7 @@ def select_module_state_layout(
     selected_actions: list[int] = []
     tx_locs: list[tuple[int, int]] = []
     for _ in range(k_max):
-        observation = build_ppo_observation(
+        observation = build_policy_observation(
             pixel_map=pixel_map,
             tx_locs=tx_locs,
             selected_actions=selected_actions,
@@ -729,37 +637,6 @@ def run_random_init(
         **metrics,
     }
 
-
-def run_ppo_init(
-    map_path: Path,
-    predictor: LocalSurrogatePredictor,
-    args: argparse.Namespace,
-) -> dict[str, Any]:
-    pixel_map = load_map_normalized(map_path)
-    selected_actions, tx_locs = select_ppo_layout(
-        pixel_map=pixel_map,
-        checkpoint_path=args.ppo_checkpoint,
-        k_max=args.k_max,
-        ppo_version=args.ppo_version,
-        coverage_threshold_db=args.coverage_threshold_db,
-    )
-    metrics = evaluate_layout(
-        pixel_map,
-        tx_locs,
-        predictor,
-        coverage_target=args.coverage_target,
-        spectral_efficiency_target=args.spectral_efficiency_target,
-        w1=args.w1,
-        w2=args.w2,
-        coverage_threshold_db=args.coverage_threshold_db,
-        noise_coefficient_db=args.noise_coefficient_db,
-    )
-    return {
-        "method": "ppo_init",
-        "selected_actions": selected_actions,
-        "positions_xy": [[int(col), int(row)] for row, col in tx_locs],
-        **metrics,
-    }
 
 
 def run_module_state_init(
@@ -1012,8 +889,6 @@ def run_one_method(
     start = time.perf_counter()
     if normalized_method == "random_init":
         payload = run_random_init(map_path, predictor, args, rng)
-    elif normalized_method == "ppo_init":
-        payload = run_ppo_init(map_path, predictor, args)
     elif normalized_method == "pretrain_init":
         if not args.pretrain_module_state:
             raise ValueError("--pretrain-module-state is required when methods include pretrain_init")
@@ -1024,15 +899,15 @@ def run_one_method(
             args=args,
             module_state_path=args.pretrain_module_state,
         )
-    elif normalized_method == "bandit_init":
-        if not args.bandit_module_state:
-            raise ValueError("--bandit-module-state is required when methods include bandit_init")
+    elif normalized_method == "rerank_init":
+        if not args.rerank_module_state:
+            raise ValueError("--rerank-module-state is required when methods include rerank_init")
         payload = run_module_state_init(
-            method_name="bandit_init",
+            method_name="rerank_init",
             map_path=map_path,
             predictor=predictor,
             args=args,
-            module_state_path=args.bandit_module_state,
+            module_state_path=args.rerank_module_state,
         )
     else:
         payload = run_heuristic_method(normalized_method, map_path, root_output_dir, args)

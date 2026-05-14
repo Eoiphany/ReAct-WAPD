@@ -205,7 +205,7 @@ class RadioMapPredictor:
 
         height, width = height_map.shape
         rounded = np.rint(site_positions).astype(int)
-        predictions: List[np.ndarray] = []
+        batched_inputs: List[np.ndarray] = []
 
         for x, y in rounded:
             if not (0 <= x < width and 0 <= y < height):
@@ -214,17 +214,20 @@ class RadioMapPredictor:
             site_map = np.zeros_like(height_map, dtype=np.uint8)
             site_map[y, x] = eval_radiomap_local.encode_tx_gray_value(int(height_map[y, x]))
             inputs = np.stack([height_map, site_map], axis=2)
-            tensor = eval_radiomap_local._numpy_image_to_tensor(inputs).unsqueeze(0).to(self.device)
+            batched_inputs.append(inputs)
 
-            with torch.no_grad():
-                pred = torch.clamp(self.model(tensor), 0, 1).detach().cpu().squeeze().numpy().astype(np.float32)
-            # Direct mapping: model output in [0, 1] is mapped to the dataset's
-            # negative pathgain-like dB range [DB_MIN, DB_MAX].
-            predictions.append(eval_radiomap_local._to_db_scale(pred).astype(np.float32))
-
-        if not predictions:
+        if not batched_inputs:
             raise ValueError("site_positions must contain at least one site")
-        return np.stack(predictions, axis=0).astype(np.float32)
+        batch = np.stack(batched_inputs, axis=0)
+        tensor = eval_radiomap_local._numpy_image_to_tensor(batch).to(self.device)
+
+        with torch.inference_mode():
+            pred = torch.clamp(self.model(tensor), 0, 1).detach().cpu().numpy().astype(np.float32)
+        if pred.ndim == 4:
+            pred = pred[:, 0]
+        # Direct mapping: model output in [0, 1] is mapped to the dataset's
+        # negative pathgain-like dB range [DB_MIN, DB_MAX].
+        return eval_radiomap_local._to_db_scale(pred).astype(np.float32)
 
     def predict(self, height_map: np.ndarray, site_positions: np.ndarray) -> np.ndarray:
         site_maps_db = self.predict_site_maps(height_map, site_positions)

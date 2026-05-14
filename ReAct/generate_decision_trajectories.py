@@ -35,7 +35,7 @@ python -m ReAct.generate_decision_trajectories \
 - --merge-datasets: 多 planner 时把所有轨迹合并成一个数据集文件；默认关闭。
 - --dataset-mode: `rationale` 只学习原因；`rationale_weights` 学习原因+权重。
 - --eval-model / --eval-device: 代理模型与设备；当前默认使用 rmnet。
-- --heuristic-max-evals / --heuristic-candidate-stride / --heuristic-candidate-limit: 传给外部启发式方法的关键搜索预算。
+- --heuristic-search-budget / --heuristic-candidate-stride / --heuristic-candidate-limit: 传给外部启发式方法的统一搜索预算与离散化参数。
 - --llamafactory-* / --qwen-* / --openai-*: 透传给对应 planner 的推理参数。
 
 脚本逻辑说明:
@@ -109,9 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-decision-mode", choices=["decide", "explain_weighted"], default="decide")
     parser.add_argument("--eval-model", choices=["pmnet", "rmnet", "proxy"], default="rmnet")
     parser.add_argument("--eval-device", choices=["auto", "cpu", "cuda", "mps"], default="mps")
-    parser.add_argument("--heuristic-max-evals", type=int, default=200)
-    parser.add_argument("--heuristic-candidate-stride", type=int, default=8)
-    parser.add_argument("--heuristic-candidate-limit", type=int, default=500)
+    parser.add_argument("--heuristic-search-budget", type=int, default=100)
+    parser.add_argument("--heuristic-candidate-stride", type=int, default=12)
+    parser.add_argument("--heuristic-candidate-limit", type=int, default=256)
     parser.add_argument("--init-mode", choices=["none", "random", "greedy", "two_stage"], default="none")
     parser.add_argument("--init-k", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llamafactory-template", default="qwen")
     parser.add_argument("--llamafactory-backend", default="huggingface")
     parser.add_argument("--llamafactory-dtype", default="auto")
-    parser.add_argument("--two-stage-module-state", default=str((ROOT_DIR / "../Autobs/bandit_policy/best_module_state.pt").resolve()))
+    parser.add_argument("--two-stage-module-state", default=str((ROOT_DIR / "../Autobs/outputs/rerank/best_module_state.pt").resolve()))
     parser.add_argument("--two-stage-version", choices=["auto", "single", "multi"], default="auto")
     parser.add_argument("--two-stage-init-k", type=int, default=1)
     parser.add_argument("--build-dataset-output", default="")
@@ -233,7 +233,7 @@ def _configure_suite_args(base: argparse.Namespace, cli_args: argparse.Namespace
     base.two_stage_version = cli_args.two_stage_version
     base.two_stage_init_k = cli_args.two_stage_init_k
     # run_task 会读这些字段；run_experiment_suite 自己的 parser 里没有全部暴露，所以这里手动补齐。
-    base.heuristic_max_evals = cli_args.heuristic_max_evals
+    base.heuristic_search_budget = cli_args.heuristic_search_budget
     base.heuristic_candidate_stride = cli_args.heuristic_candidate_stride
     base.heuristic_candidate_limit = cli_args.heuristic_candidate_limit
     return base

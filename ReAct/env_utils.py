@@ -137,21 +137,50 @@ def normalize_redundancy_target(value) -> dict[str, float]:
 
 
 # pixel_map是二维的
+def _action_block_bounds(pixel_map: np.ndarray, row_r: int, col_r: int) -> tuple[int, int, int, int]:
+    height, width = pixel_map.shape
+    row_step = max(height // action_space_size, 1)
+    col_step = max(width // action_space_size, 1)
+    row0 = row_r * row_step
+    row1 = min((row_r + 1) * row_step, height)
+    col0 = col_r * col_step
+    col1 = min((col_r + 1) * col_step, width)
+    return row0, row1, col0, col1
+
+
 def calc_action_mask(pixel_map: np.ndarray) -> np.ndarray:
-    # upsampling_factor = map_size // action_space_size
-    # 采样upsampling_factor的中心位置作为动作点
-    idx = np.arange((upsampling_factor - 1) // 2, map_size, upsampling_factor)
-    # 找到当前pixel_map中tx所在RoI区域采样块内的所有中心位置行，再从选出的这些行_tx_mask(pixel_map)[idx]中选择中心位置列
-    action_pixels = np.where(_tx_mask(pixel_map)[idx][:, idx], 1, 0)
-    # 从原始mask里，按固定间隔采样出一张“低分辨率网格”，只保留这些中心点的True/False情况
-    return action_pixels.reshape(-1).astype(np.float32)
+    mask = np.zeros((action_space_size, action_space_size), dtype=np.float32)
+    tx_mask = _tx_mask(pixel_map)
+    for row_r in range(action_space_size):
+        for col_r in range(action_space_size):
+            row0, row1, col0, col1 = _action_block_bounds(pixel_map, row_r, col_r)
+            block = tx_mask[row0:row1, col0:col1]
+            mask[row_r, col_r] = 1.0 if np.any(block) else 0.0
+    return mask.reshape(-1).astype(np.float32)
 
 
-def calc_upsampling_loc(action: int) -> tuple[int, int]:
+def calc_upsampling_loc(action: int, pixel_map: np.ndarray | None = None) -> tuple[int, int]:
     row_r, col_r = divmod(action, action_space_size)
-    row = row_r * upsampling_factor + (upsampling_factor - 1) // 2
-    col = col_r * upsampling_factor + (upsampling_factor - 1) // 2
-    return row, col
+    if pixel_map is None:
+        row = row_r * upsampling_factor + (upsampling_factor - 1) // 2
+        col = col_r * upsampling_factor + (upsampling_factor - 1) // 2
+        return int(row), int(col)
+
+    row0, row1, col0, col1 = _action_block_bounds(pixel_map, row_r, col_r)
+    block = _tx_mask(pixel_map)[row0:row1, col0:col1]
+    ys, xs = np.where(block)
+    if len(xs) == 0:
+        row = row0 + max((row1 - row0 - 1) // 2, 0)
+        col = col0 + max((col1 - col0 - 1) // 2, 0)
+        return int(row), int(col)
+
+    center_y = (row1 - row0 - 1) / 2.0
+    center_x = (col1 - col0 - 1) / 2.0
+    distances = (ys.astype(np.float32) - center_y) ** 2 + (xs.astype(np.float32) - center_x) ** 2
+    best_idx = int(np.argmin(distances))
+    row = row0 + int(ys[best_idx])
+    col = col0 + int(xs[best_idx])
+    return int(row), int(col)
 
 
 def get_powermap(pixel_map: np.ndarray, tx_layer: np.ndarray, pmnet: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:

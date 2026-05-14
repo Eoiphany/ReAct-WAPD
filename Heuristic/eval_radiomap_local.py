@@ -22,10 +22,14 @@ def get_device() -> torch.device:
 
 
 def _numpy_image_to_tensor(array: np.ndarray) -> torch.Tensor:
-    if array.ndim == 2:
-        tensor = torch.tensor(array.tolist(), dtype=torch.float32).unsqueeze(0)
-    elif array.ndim == 3:
-        tensor = torch.tensor(array.tolist(), dtype=torch.float32).permute(2, 0, 1)
+    array = np.ascontiguousarray(array)
+    tensor = torch.from_numpy(array).to(dtype=torch.float32)
+    if tensor.ndim == 2:
+        tensor = tensor.unsqueeze(0)
+    elif tensor.ndim == 3:
+        tensor = tensor.permute(2, 0, 1)
+    elif tensor.ndim == 4:
+        tensor = tensor.permute(0, 3, 1, 2)
     else:
         raise ValueError(f"Unsupported image shape: {array.shape}")
     return tensor / 255.0

@@ -64,7 +64,12 @@ def _metric_requested(lower: str, raw_text: str, metric: str) -> bool:
     if metric == "coverage":
         return ("coverage" in lower) or ("覆盖" in raw_text)
     if metric == "capacity":
-        return ("capacity" in lower) or ("容量" in raw_text)
+        return (
+            ("capacity" in lower)
+            or ("spectral efficiency" in lower)
+            or ("容量" in raw_text)
+            or ("频谱效率" in raw_text)
+        )
     if metric == "redundancy":
         return ("redundancy" in lower) or ("冗余" in raw_text)
     return False
@@ -173,21 +178,25 @@ def compute_dynamic_metric_weights(observation: Any) -> Dict[str, float]:
 
     target_cov = goal.get("targets", {}).get("coverage_pct")
     target_cap = goal.get("targets", {}).get("capacity")
-    target_red = normalize_redundancy_target(goal.get("targets", {}).get("redundancy_rate"))
+    target_red_raw = goal.get("targets", {}).get("redundancy_rate")
+    target_red = normalize_redundancy_target(target_red_raw) if target_red_raw is not None else None
     primary = str(goal.get("primary") or "")
 
     cov = _safe_float(metrics.get("coverage"), 0.0)
     cap = _safe_float(metrics.get("capacity"), 0.0)
-    red = _safe_float(metrics.get("redundancy_rate"), target_red["ideal"])
+    red = _safe_float(metrics.get("redundancy_rate"), target_red["ideal"] if target_red is not None else 0.0)
     site_count = int(state.get("site_count") or 0)
     site_limit = constraints.get("site_limit")
 
     cov_gap = _safe_float(margins.get("coverage_gap"), max(0.0, float(target_cov) - cov) if target_cov is not None else 0.0)
     cap_gap = _safe_float(margins.get("capacity_gap"), max(0.0, float(target_cap) - cap) if target_cap is not None else 0.0)
-    red_gap = _safe_float(
-        margins.get("redundancy_gap"),
-        max(0.0, abs(red - float(target_red["ideal"])) - float(target_red["tolerance"])),
-    )
+    if target_red is not None:
+        red_gap = _safe_float(
+            margins.get("redundancy_gap"),
+            max(0.0, abs(red - float(target_red["ideal"])) - float(target_red["tolerance"])),
+        )
+    else:
+        red_gap = 0.0
     site_over = max(0, int(margins.get("site_over") or 0))
     if site_limit is not None:
         site_over = max(site_over, max(0, site_count - int(site_limit)))
@@ -196,21 +205,21 @@ def compute_dynamic_metric_weights(observation: Any) -> Dict[str, float]:
         raw = {
             "w_cov": 1.0,
             "w_cap": 1.0,
-            "w_red": 0.2,
+            "w_red": 0.0,
             "w_sites": 0.0,
         }
     elif target_cap is not None or primary == "maximize_capacity":
         raw = {
             "w_cov": 0.4,
             "w_cap": 1.0,
-            "w_red": 0.2,
+            "w_red": 0.0,
             "w_sites": 0.0,
         }
     else:
         raw = {
             "w_cov": 1.0,
             "w_cap": 0.2,
-            "w_red": 0.2,
+            "w_red": 0.0,
             "w_sites": 0.0,
         }
     # 如果覆盖缺口大，就提高 w_cov；容量缺口大，就提高 w_cap；冗余偏离目标，就提高 w_red；站点数超限，就提高 w_sites 惩罚
@@ -218,7 +227,7 @@ def compute_dynamic_metric_weights(observation: Any) -> Dict[str, float]:
         raw["w_cov"] = max(raw["w_cov"], 1.0 + cov_gap * 4.0)
     if cap_gap > 0:
         raw["w_cap"] = max(raw["w_cap"], 0.5 + cap_gap * 2.5)
-    if red_gap > 0:
+    if target_red is not None and red_gap > 0:
         raw["w_red"] = max(raw["w_red"], 0.6 + red_gap * 4.0)
     if site_over > 0:
         raw["w_sites"] = max(raw["w_sites"], 0.15 + 0.05 * site_over)
@@ -229,7 +238,7 @@ def compute_dynamic_metric_weights(observation: Any) -> Dict[str, float]:
     weights, ok = normalize_metric_weights(raw)
     if ok and weights is not None:
         return weights
-    return {"w_cov": 0.6, "w_cap": 0.15, "w_red": 0.15, "w_sites": 0.10}
+    return {"w_cov": 0.6, "w_cap": 0.3, "w_red": 0.0, "w_sites": 0.10}
 
 
 # 从用户自然语言中抽取目标、约束和目标函数偏好
@@ -240,7 +249,7 @@ def infer_request_overrides(user_request: str) -> Tuple[Dict[str, Any], Dict[str
     constraints: Dict[str, Any] = {}
     objective = {"w_cov": 1.0, "w_cap": 0.2, "w_red": 0.0, "w_sites": 0.0}
     fixed_site_count: Optional[int] = None
-    goal["targets"]["redundancy_rate"] = default_redundancy_target()
+    no_redundancy_optimization = ("do not optimize redundancy" in lower) or ("不优化冗余" in text) or ("不要优化冗余" in text)
 
     # _metric_requested returns bool
     coverage_requested = _metric_requested(lower, text, "coverage")
@@ -274,9 +283,10 @@ def infer_request_overrides(user_request: str) -> Tuple[Dict[str, Any], Dict[str
     if ("cost" in lower) or ("成本" in text) or ("energy" in lower) or ("能耗" in text):
         objective["w_sites"] = max(objective["w_sites"], 0.05)
 
-    if redundancy_requested and not (coverage_requested or capacity_requested):
+    if redundancy_requested and not no_redundancy_optimization and not (coverage_requested or capacity_requested):
         goal["primary"] = "balance_redundancy"
-    if redundancy_requested:
+    if redundancy_requested and not no_redundancy_optimization:
+        goal["targets"]["redundancy_rate"] = default_redundancy_target()
         objective["w_red"] = max(objective["w_red"], 0.8)
         objective["w_cov"] = max(objective["w_cov"], 0.4)
         objective["w_cap"] = max(objective["w_cap"], 0.3)
@@ -293,16 +303,18 @@ def infer_request_overrides(user_request: str) -> Tuple[Dict[str, Any], Dict[str
 
     # 用正则提取“固定站点数”“最多多少站点”“覆盖率至少多少”“容量至少多少”等约束条件
     coverage_vals: List[float] = []
-    coverage_vals += [
-        float(v) / 100.0
-        for v in re.findall(r"(?:coverage|覆盖).*?(?:>=|>|at least|至少|不低于|不少于)\s*([0-9]+(?:\.[0-9]+)?)\s*%", lower)
-    ]
+    coverage_pattern = r"(?:coverage|覆盖)[^.。\n]{0,80}?(?:>=|>|at least|至少|不低于|不少于)\s*([0-9]+(?:\.[0-9]+)?)\s*%"
+    coverage_vals += [float(v) / 100.0 for v in re.findall(coverage_pattern, lower)]
     if coverage_vals:
         goal["targets"]["coverage_pct"] = max(coverage_vals)
     elif fixed_site_count is not None:
         goal["targets"]["coverage_pct"] = None
 
-    match = re.search(r"(?:capacity|容量).*?(?:>=|>|at least|至少|不低于|不少于)\s*([0-9]+(?:\.[0-9]+)?)", lower)
+    capacity_pattern = (
+        r"(?:capacity|spectral efficiency|容量|频谱效率)[^.。\n]{0,80}?"
+        r"(?:>=|>|at least|至少|不低于|不少于)\s*([0-9]+(?:\.[0-9]+)?)"
+    )
+    match = re.search(capacity_pattern, lower)
     if match:
         goal["targets"]["capacity"] = float(match.group(1))
     elif fixed_site_count is not None:
@@ -359,7 +371,7 @@ def init_locs_random(city_map_path: str, seed: int, k: int = 1) -> List[Tuple[in
     chosen = np.atleast_1d(rng.choice(valid_ids, size=kk, replace=False))
     out = []
     for action_id in chosen:
-        row, col = calc_upsampling_loc(int(action_id))
+        row, col = calc_upsampling_loc(int(action_id), pixel_map)
         out.append((int(row), int(col)))
     return out
 
@@ -525,9 +537,22 @@ def plan_action_heuristic(
                 },
             },
         }
-    # 必须满足“固定站点数量”
-    if site_exact is not None and site_count < int(site_exact) and best_add is not None:
-        return {"name": "Propose", "args": {"sites": [{"row": best_add["row"], "col": best_add["col"], "z_m": best_add["z_m"]}], "mode": "add"}}
+    # 固定站点模式下，启发式只负责补满站点数；达到精确数量后直接结束，不再执行 Refine。
+    if site_exact is not None:
+        if site_count < int(site_exact) and best_add is not None:
+            return {"name": "Propose", "args": {"sites": [{"row": best_add["row"], "col": best_add["col"], "z_m": best_add["z_m"]}], "mode": "add"}}
+        metrics = env._evaluate()
+        return {
+            "name": "Finish",
+            "args": {
+                "final_site_set": _sites_from_locs(env, current_locs),
+                "metrics": {
+                    "coverage": float(metrics.coverage),
+                    "capacity": float(metrics.capacity),
+                    "redundancy_rate": float(metrics.redundancy_rate),
+                },
+            },
+        }
     # 超过最大站点数
     if site_limit is not None and site_count > site_limit and best_remove_idx is not None:
         return {"name": "Refine", "args": {"rule_or_delta": {"op": "remove", "id": best_remove_idx}}}
@@ -682,25 +707,75 @@ def _try_parse_json(raw: str) -> Optional[Dict[str, Any]]:
             return None
 
 
+def _unwrap_decide_payload(obj: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, list) and obj:
+        first = obj[0]
+        if isinstance(first, dict):
+            return first
+    return None
+
+
+def _is_action_payload(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("selected_action"), dict):
+        return True
+    name = payload.get("name")
+    return isinstance(name, str) and name in {"Propose", "Refine", "Finish"}
+
+
 def parse_decide_payload(text: str) -> Dict[str, Any]:
     upper = text.upper()
     idx = upper.find("DECIDE[")
+    fallback_payload: Optional[Dict[str, Any]] = None
     # 找到了目标后从 DECIDE[ 出现的位置开始找后面的第一个 {
     if idx != -1:
+        bracket_start = text.find("[", idx)
+        if bracket_start != -1:
+            raw_list = _extract_balanced_json(text, bracket_start)
+            obj = _try_parse_json(raw_list)
+            payload = _unwrap_decide_payload(obj)
+            if payload is not None and _is_action_payload(payload):
+                return payload
+            if payload is not None and fallback_payload is None:
+                fallback_payload = payload
         brace_start = text.find("{", idx)
         if brace_start != -1:
             raw = _extract_balanced_json(text, brace_start)
             obj = _try_parse_json(raw)
-            if isinstance(obj, dict):
-                return obj
-    # 如果 DECIDE[ 路径失败，就全局扫描所有 {
+            payload = _unwrap_decide_payload(obj)
+            if payload is not None and _is_action_payload(payload):
+                return payload
+            if payload is not None and fallback_payload is None:
+                fallback_payload = payload
+    # 如果 DECIDE[ 路径失败，就全局扫描所有 [ 或 {
+    for i, ch in enumerate(text):
+        if ch != "[":
+            continue
+        raw = _extract_balanced_json(text, i)
+        obj = _try_parse_json(raw)
+        payload = _unwrap_decide_payload(obj)
+        if payload is not None and _is_action_payload(payload):
+            return payload
+        if payload is not None and fallback_payload is None:
+            fallback_payload = payload
     for i, ch in enumerate(text):
         if ch != "{":
             continue
         raw = _extract_balanced_json(text, i)
         obj = _try_parse_json(raw)
-        if isinstance(obj, dict):
-            return obj
+        payload = _unwrap_decide_payload(obj)
+        if payload is not None and _is_action_payload(payload):
+            return payload
+        if payload is not None and fallback_payload is None:
+            fallback_payload = payload
+    recovered = recover_direct_action_from_text(text)
+    if recovered is not None:
+        return {"selected_action": recovered}
+    if fallback_payload is not None:
+        return fallback_payload
     raise ValueError("LLM output missing DECIDE[...] payload")
 
 
@@ -711,13 +786,20 @@ def recover_direct_action_from_text(text: str) -> Optional[Dict[str, Any]]:
     name_match = re.search(r'"selected_action"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"', text)
     if not name_match:
         name_match = re.search(r'"name"\s*:\s*"([^"]+)"', text)
-        if not name_match:
+    if not name_match:
+        action_hint_match = re.search(r'action\s*=\s*(Propose|Refine|Finish)', text, flags=re.IGNORECASE)
+        if action_hint_match:
+            hinted = action_hint_match.group(1)
+            name = hinted[0].upper() + hinted[1:].lower()
+        else:
             return None
-    name = name_match.group(1).strip()
+    else:
+        name = name_match.group(1).strip()
     if name == "Propose":
         candidate_index_match = re.search(r'"candidate_index"\s*:\s*(-?\d+)', text)
         if candidate_index_match:
             return {"name": "Propose", "args": {"candidate_index": int(candidate_index_match.group(1))}}
+        return {"name": "Propose", "args": {"candidate_index": 0}}
     if name == "Refine":
         compact_op = re.search(r'"refine_op"\s*:\s*"([^"]+)"', text)
         if compact_op:
@@ -908,6 +990,180 @@ def select_best_candidate_with_weights(
     best = max(pool, key=lambda item: float(item.get("weighted_score", item.get("score", -1e9))))
     return best, scored
 
+
+def select_best_action_with_weights(
+    env: RadioMapEnv,
+    candidates: List[Dict[str, Any]],
+    weights: Dict[str, float],
+    redundancy_target: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    if env.last_metrics is None:
+        env._evaluate()
+
+    current_locs = list(env.tx_locs)
+    current_set = {(int(r), int(c)) for r, c in current_locs}
+    base_metrics = env.last_metrics
+    site_status = evaluate_site_count_constraints(getattr(env, "constraints", {}) or {}, len(current_locs))
+    site_limit = site_status["site_limit"]
+    site_exact = site_status["site_exact"]
+    site_limit = None if site_limit is None else int(site_limit)
+    site_exact = None if site_exact is None else int(site_exact)
+    goal = getattr(env, "goal", {}) or {}
+    target_cfg = normalize_redundancy_target(redundancy_target or goal.get("targets", {}).get("redundancy_rate"))
+
+    normalized, ok = normalize_metric_weights(weights)
+    if not ok or normalized is None:
+        normalized = compute_dynamic_metric_weights(
+            {"goal": env.goal, "constraints": env.constraints, "state": {"site_count": len(current_locs), "last_metrics": {}}, "diagnosis": {"margins": {}}}
+        )
+
+    def weighted_score(metrics: Any, site_count: int) -> float:
+        cov = _safe_float(getattr(metrics, "coverage", 0.0))
+        cap = _safe_float(getattr(metrics, "capacity", 0.0))
+        red = _safe_float(getattr(metrics, "redundancy_rate", 0.0))
+        red_score = redundancy_balance_score(red, target_cfg)
+        return (
+            float(normalized.get("w_cov", 0.0)) * cov
+            + float(normalized.get("w_cap", 0.0)) * cap
+            + float(normalized.get("w_red", 0.0)) * red_score
+            - float(normalized.get("w_sites", 0.0)) * site_count
+        )
+
+    def weighted_score_from_values(cov: float, cap: float, red: float, site_count: int) -> float:
+        red_score = redundancy_balance_score(red, target_cfg)
+        return (
+            float(normalized.get("w_cov", 0.0)) * cov
+            + float(normalized.get("w_cap", 0.0)) * cap
+            + float(normalized.get("w_red", 0.0)) * red_score
+            - float(normalized.get("w_sites", 0.0)) * site_count
+        )
+
+    base_score = weighted_score(base_metrics, len(current_locs))
+    target_cov = goal.get("targets", {}).get("coverage_pct")
+    target_cap = goal.get("targets", {}).get("capacity")
+    cov_ok = target_cov is None or _safe_float(base_metrics.coverage) >= float(target_cov)
+    cap_ok = target_cap is None or _safe_float(base_metrics.capacity) >= float(target_cap)
+    cov_gap = 0.0 if target_cov is None else max(0.0, float(target_cov) - _safe_float(base_metrics.coverage))
+    cap_gap = 0.0 if target_cap is None else max(0.0, float(target_cap) - _safe_float(base_metrics.capacity))
+    if (
+        cov_ok
+        and cap_ok
+        and site_status["within_limit"]
+        and site_status["exact_satisfied"]
+    ):
+        return {
+            "name": "Finish",
+            "args": {
+                "final_site_set": _sites_from_locs(env, current_locs),
+                "metrics": {
+                    "coverage": float(base_metrics.coverage),
+                    "capacity": float(base_metrics.capacity),
+                    "redundancy_rate": float(base_metrics.redundancy_rate),
+                },
+            },
+        }
+
+    best_action: Optional[Dict[str, Any]] = None
+    best_score = -1e18
+    remaining_budget = None if site_limit is None else max(0, site_limit - len(current_locs))
+
+    try:
+        if site_exact is None or len(current_locs) < site_exact:
+            for cand in candidates:
+                try:
+                    row = int(cand["row"])
+                    col = int(cand["col"])
+                except Exception:
+                    continue
+                if (row, col) in current_set:
+                    continue
+                if site_limit is not None and len(current_locs) + 1 > site_limit:
+                    continue
+                if all(key in cand for key in ("coverage", "capacity", "redundancy_rate")):
+                    cand_score = weighted_score_from_values(
+                        _safe_float(cand.get("coverage")),
+                        _safe_float(cand.get("capacity")),
+                        _safe_float(cand.get("redundancy_rate")),
+                        len(current_locs) + 1,
+                    )
+                else:
+                    env.tx_locs = current_locs + [(row, col)]
+                    metrics = env._evaluate()
+                    cand_score = weighted_score(metrics, len(env.tx_locs))
+                if cand_score > best_score:
+                    best_score = cand_score
+                    best_action = {
+                        "name": "Propose",
+                        "args": {"sites": [{"row": row, "col": col, "z_m": float(cand.get("z_m", 3.0))}], "mode": "add"},
+                    }
+
+        should_search_refine = best_action is None
+        if not should_search_refine and current_locs:
+            if site_exact is not None:
+                should_search_refine = len(current_locs) >= site_exact
+            else:
+                near_target = cov_gap <= 0.03 and cap_gap <= 0.15
+                budget_exhausted = remaining_budget is not None and remaining_budget <= 0
+                should_search_refine = near_target or budget_exhausted
+
+        move_candidates = candidates[: min(len(candidates), 6)] if should_search_refine else []
+
+        if site_exact is None and current_locs and should_search_refine:
+            for site_idx in range(len(current_locs)):
+                for cand in move_candidates:
+                    try:
+                        row = int(cand["row"])
+                        col = int(cand["col"])
+                    except Exception:
+                        continue
+                    if current_locs[site_idx] == (row, col):
+                        continue
+                    if (row, col) in current_set and current_locs[site_idx] != (row, col):
+                        continue
+                    env.tx_locs = list(current_locs)
+                    env.tx_locs[site_idx] = (row, col)
+                    metrics = env._evaluate()
+                    cand_score = weighted_score(metrics, len(env.tx_locs))
+                    if cand_score > best_score:
+                        best_score = cand_score
+                        best_action = {
+                            "name": "Refine",
+                            "args": {"rule_or_delta": {"op": "move", "id": int(site_idx), "row": row, "col": col}},
+                        }
+
+        if site_exact is None and len(current_locs) > 1 and should_search_refine:
+            for site_idx in range(len(current_locs)):
+                env.tx_locs = [loc for i, loc in enumerate(current_locs) if i != site_idx]
+                metrics = env._evaluate()
+                cand_score = weighted_score(metrics, len(env.tx_locs))
+                if cand_score > best_score:
+                    best_score = cand_score
+                    best_action = {
+                        "name": "Refine",
+                        "args": {"rule_or_delta": {"op": "remove", "id": int(site_idx)}},
+                    }
+    finally:
+        env.tx_locs = current_locs
+        env.last_metrics = base_metrics
+
+    if best_action is not None:
+        if best_score > base_score:
+            return best_action
+        if not (cov_ok and cap_ok and site_status["within_limit"] and site_status["exact_satisfied"]):
+            return best_action
+
+    return {
+        "name": "Finish",
+        "args": {
+            "final_site_set": _sites_from_locs(env, current_locs),
+            "metrics": {
+                "coverage": float(base_metrics.coverage),
+                "capacity": float(base_metrics.capacity),
+                "redundancy_rate": float(base_metrics.redundancy_rate),
+            },
+        },
+    }
+
 # 把给 LLM 的 observation 压缩成更短、更干净、更适合决策的 JSON 文本
 def compact_obs_for_llm_decide(observation: str, max_candidates: int = 16, exclude_action_ids: Optional[Set[int]] = None) -> str:
     try:
@@ -988,7 +1244,15 @@ def call_openai_chat(api_key: str, model: str, messages: List[Dict[str, str]], b
 
 
 def extract_selected_action(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return payload["selected_action"] if "selected_action" in payload else payload
+    normalized = _unwrap_decide_payload(payload) if not isinstance(payload, dict) else payload
+    if normalized is None:
+        return {}
+    selected_action = normalized.get("selected_action")
+    if isinstance(selected_action, dict):
+        return selected_action
+    if isinstance(normalized.get("name"), str):
+        return normalized
+    return {}
 
 
 def extract_rationale(payload: Dict[str, Any]) -> str:
@@ -1069,6 +1333,33 @@ def validate_action(env: RadioMapEnv, action: Dict[str, Any], obs_payload: Optio
 def repair_action_with_candidates(action: Dict[str, Any], obs_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(action, dict) or not isinstance(obs_payload, dict):
         return action
+    state = obs_payload.get("state") or {}
+    constraints = obs_payload.get("constraints") or {}
+    diagnosis = obs_payload.get("diagnosis") or {}
+    try:
+        site_count = int(state.get("site_count") or 0)
+    except Exception:
+        site_count = 0
+    try:
+        site_limit = constraints.get("site_limit")
+        site_limit = None if site_limit is None else int(site_limit)
+    except Exception:
+        site_limit = None
+    diagnosis_ok = bool(diagnosis.get("ok"))
+
+    def _normalize_site_id(raw_id: Any) -> int:
+        try:
+            site_id = int(raw_id)
+        except Exception:
+            return -1
+        if site_count <= 0:
+            return site_id
+        if 0 <= site_id < site_count:
+            return site_id
+        if 1 <= site_id <= site_count:
+            return site_id - 1
+        return min(max(site_id, 0), site_count - 1)
+
     # {
     #     "name": "Propose",
     #     "args": {
@@ -1078,6 +1369,45 @@ def repair_action_with_candidates(action: Dict[str, Any], obs_payload: Optional[
     # }
     if action.get("name") == "Propose":
         args = action.get("args", {}) or {}
+        if site_limit is not None and site_count >= site_limit and diagnosis_ok:
+            return {"name": "Finish", "args": {}}
+        if site_limit is not None and site_count >= site_limit and site_count > 0:
+            candidates = obs_payload.get("candidates") or []
+            candidate_index = args.get("candidate_index")
+            try:
+                candidate_index = int(candidate_index)
+                cand = candidates[candidate_index]
+            except Exception:
+                cand = None
+            if isinstance(cand, dict):
+                return {
+                    "name": "Refine",
+                    "args": {
+                        "rule_or_delta": {
+                            "op": "move",
+                            "id": max(0, site_count - 1),
+                            "row": int(cand["row"]),
+                            "col": int(cand["col"]),
+                        }
+                    },
+                }
+            sites = args.get("sites") or []
+            if sites:
+                try:
+                    site = sites[0]
+                    return {
+                        "name": "Refine",
+                        "args": {
+                            "rule_or_delta": {
+                                "op": "move",
+                                "id": max(0, site_count - 1),
+                                "row": int(site["row"]),
+                                "col": int(site["col"]),
+                            }
+                        },
+                    }
+                except Exception:
+                    pass
         if args.get("sites"):
             return action
         # {
@@ -1116,7 +1446,7 @@ def repair_action_with_candidates(action: Dict[str, Any], obs_payload: Optional[
         # }
         op = args.get("refine_op")
         if op == "remove":
-            return {"name": "Refine", "args": {"rule_or_delta": {"op": "remove", "id": int(args.get("id", -1))}}}
+            return {"name": "Refine", "args": {"rule_or_delta": {"op": "remove", "id": _normalize_site_id(args.get("id", -1))}}}
         # {
         #     "name": "Refine",
         #     "args": {
@@ -1140,7 +1470,7 @@ def repair_action_with_candidates(action: Dict[str, Any], obs_payload: Optional[
                         if int(cand.get("action_id")) == target_action_id:
                             return {
                                 "name": "Refine",
-                                "args": {"rule_or_delta": {"op": "move", "id": int(args.get("id", -1)), "row": int(cand["row"]), "col": int(cand["col"])}},
+                                "args": {"rule_or_delta": {"op": "move", "id": _normalize_site_id(args.get("id", -1)), "row": int(cand["row"]), "col": int(cand["col"])}},
                             }
                     except Exception:
                         continue

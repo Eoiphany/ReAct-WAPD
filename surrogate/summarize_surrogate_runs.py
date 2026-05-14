@@ -11,7 +11,7 @@ python -m paper_experiment.surrogate.summarize_surrogate_runs \
 
 参数说明:
 - --runs-root: 训练结果根目录，内部应包含 `pmnet_usc/16_...` 这类实验目录。
-- --output-root: 汇总产物输出目录；脚本会写入 `csv/md/json/png`。
+- --output-root: 汇总产物输出目录；脚本会写入 `csv/md/json/svg`。
 - --batch-size: 评估时 DataLoader 的 batch size。
 - --num-workers: 评估时 DataLoader worker 数量。
 - --device: 推理设备，`auto/cpu/cuda/mps`。
@@ -90,6 +90,7 @@ FIGURE_TITLES = {
 }
 DB_MIN = -162.0
 DB_MAX = -75.0
+QUALITATIVE_FIGURE_SUFFIX = ".svg"
 
 
 @dataclass(frozen=True)
@@ -208,7 +209,14 @@ def resolve_local_data_root(dataset: str) -> Path:
     return data_root
 
 
-def resolve_usc_val_sample_ids(experiment: ExperimentRun, data_root: Path) -> list[str]:
+def resolve_usc_split_sample_ids(experiment: ExperimentRun, data_root: Path, split_name: str) -> list[str]:
+    split_path = experiment.run_dir / f"{split_name}_split.csv"
+    if split_path.exists():
+        return _read_single_column_csv(split_path)
+
+    if split_name != "val":
+        raise FileNotFoundError(f"Missing {split_name} split for {experiment.model_type}: {split_path}")
+
     val_split_path = experiment.run_dir / "val_split.csv"
     if val_split_path.exists():
         return _read_single_column_csv(val_split_path)
@@ -240,17 +248,18 @@ def _read_single_column_csv(csv_path: Path) -> list[str]:
 def build_named_loader(
     *,
     experiment: ExperimentRun,
+    split_name: str,
     batch_size: int,
     num_workers: int,
 ) -> tuple[DataLoader, list[str]]:
     dataset = experiment.dataset
     data_root = resolve_local_data_root(dataset)
     if dataset == "usc":
-        sample_ids = resolve_usc_val_sample_ids(experiment, data_root)
+        sample_ids = resolve_usc_split_sample_ids(experiment, data_root, split_name)
         named_dataset = USCNamedDataset(data_root, sample_ids)
         ordered_names = list(sample_ids)
     else:
-        sample_pairs = resolve_radiomap_split_pairs(experiment, "test")
+        sample_pairs = resolve_radiomap_split_pairs(experiment, split_name)
         use_height = bool(experiment.config.get("use_height", True))
         named_dataset = RadioMapNamedDataset(data_root, sample_pairs, use_height=use_height)
         ordered_names = [f"{scene_id}_{tx_id}" for scene_id, tx_id in sample_pairs]
@@ -270,12 +279,14 @@ def build_named_loader(
 def evaluate_experiment(
     *,
     experiment: ExperimentRun,
+    split_name: str,
     device: torch.device,
     batch_size: int,
     num_workers: int,
 ) -> tuple[MetricRow, list[str]]:
     loader, ordered_names = build_named_loader(
         experiment=experiment,
+        split_name=split_name,
         batch_size=batch_size,
         num_workers=num_workers,
     )
@@ -318,7 +329,6 @@ def evaluate_experiment(
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
-    split_name = "val" if experiment.dataset == "usc" else "test"
     denom = max(total_samples, 1)
     metric_row = MetricRow(
         dataset=experiment.dataset,
@@ -346,9 +356,17 @@ def choose_figure_sample(dataset: str, ordered_names: list[str]) -> str:
 
 
 def resolve_best_val_sample_names(experiment: ExperimentRun) -> list[str]:
+    return resolve_split_sample_names(experiment, "val")
+
+
+def resolve_test_sample_names(experiment: ExperimentRun) -> list[str]:
+    return resolve_split_sample_names(experiment, "test")
+
+
+def resolve_split_sample_names(experiment: ExperimentRun, split_name: str) -> list[str]:
     if experiment.dataset == "usc":
-        return resolve_usc_val_sample_ids(experiment, resolve_local_data_root("usc"))
-    sample_pairs = resolve_radiomap_split_pairs(experiment, "val")
+        return resolve_usc_split_sample_ids(experiment, resolve_local_data_root("usc"), split_name)
+    sample_pairs = resolve_radiomap_split_pairs(experiment, split_name)
     return [f"{scene_id}_{tx_id}" for scene_id, tx_id in sample_pairs]
 
 
@@ -412,6 +430,7 @@ def build_best_val_metric_row(
     if any(merged_metrics[metric_name] is None for metric_name in ("best_val_rmse", "best_val_mae", "best_val_r2")):
         fallback_metrics, _ = evaluate_experiment(
             experiment=experiment,
+            split_name="val",
             device=device,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -431,6 +450,47 @@ def build_best_val_metric_row(
         rmse=float(merged_metrics["best_val_rmse"]),
         mae=float(merged_metrics["best_val_mae"]),
         r2=float(merged_metrics["best_val_r2"]),
+        checkpoint_path=str(experiment.checkpoint_path),
+        run_dir=str(experiment.run_dir),
+    )
+
+
+def build_test_metric_row(
+    *,
+    experiment: ExperimentRun,
+    device: torch.device,
+    batch_size: int,
+    num_workers: int,
+) -> MetricRow:
+    test_metrics = {
+        "test_rmse": experiment.metrics_summary.get("test_rmse"),
+        "test_mae": experiment.metrics_summary.get("test_mae"),
+        "test_r2": experiment.metrics_summary.get("test_r2"),
+    }
+    sample_names = resolve_test_sample_names(experiment)
+
+    if any(test_metrics[metric_name] is None for metric_name in ("test_rmse", "test_mae", "test_r2")):
+        fallback_metrics, _ = evaluate_experiment(
+            experiment=experiment,
+            split_name="test",
+            device=device,
+            batch_size=batch_size,
+            num_workers=num_workers,
+        )
+        test_metrics = {
+            "test_rmse": fallback_metrics.rmse,
+            "test_mae": fallback_metrics.mae,
+            "test_r2": fallback_metrics.r2,
+        }
+
+    return MetricRow(
+        dataset=experiment.dataset,
+        model_type=experiment.model_type,
+        split_name="test",
+        sample_count=int(experiment.metrics_summary.get("test_sample_count", len(sample_names))),
+        rmse=float(test_metrics["test_rmse"]),
+        mae=float(test_metrics["test_mae"]),
+        r2=float(test_metrics["test_r2"]),
         checkpoint_path=str(experiment.checkpoint_path),
         run_dir=str(experiment.run_dir),
     )
@@ -589,7 +649,7 @@ def save_cross_model_figure(
         y=1.05,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=500, bbox_inches="tight", pad_inches=0.12)
+    fig.savefig(output_path, dpi=500, bbox_inches="tight", pad_inches=0.12, facecolor="white", edgecolor="white")
     plt.close(fig)
 
 
@@ -709,8 +769,23 @@ def main() -> None:
                     num_workers=args.num_workers,
                 )
             )
+            metric_rows.append(
+                build_test_metric_row(
+                    experiment=experiments[(dataset, model_type)],
+                    device=device,
+                    batch_size=args.batch_size,
+                    num_workers=args.num_workers,
+                )
+            )
 
-    metric_rows.sort(key=lambda row: (DATASET_ORDER.index(row.dataset), MODEL_ORDER.index(row.model_type)))
+    split_order = {"best_val": 0, "test": 1}
+    metric_rows.sort(
+        key=lambda row: (
+            DATASET_ORDER.index(row.dataset),
+            MODEL_ORDER.index(row.model_type),
+            split_order.get(row.split_name, 99),
+        )
+    )
     write_metric_outputs(metric_rows=metric_rows, selected_samples=selected_samples, output_root=output_root)
 
     figures_dir = output_root / "figures"
@@ -726,7 +801,7 @@ def main() -> None:
             )
             for model_type in MODEL_ORDER
         ]
-        figure_path = figures_dir / f"{dataset}_cross_model_prediction_comparison.png"
+        figure_path = figures_dir / f"{dataset}_cross_model_prediction_comparison{QUALITATIVE_FIGURE_SUFFIX}"
         save_cross_model_figure(
             dataset=dataset,
             sample_name=sample_name,

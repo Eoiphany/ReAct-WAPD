@@ -1,17 +1,24 @@
 """
 用途:
-  直接从本地 Qwen 模型目录加载 tokenizer / model，并以 chat 方式生成单轮决策结果。
+  直接从本地 Qwen 基座模型目录加载 tokenizer / model，可选叠加 LoRA adapter，并以 chat 方式生成单轮决策结果。
 
 示例命令:
   python ReAct/run_access_point_decision.py \
     --planner qwen \
-    --qwen-model-path Qwen/Qwen2.5-7B \
+    --qwen-model-path Qwen2.5-7B \
+    --city-map-path dataset/example.png \
+    --user-request-path ReAct/requests/task1.txt
+
+  python ReAct/run_access_point_decision.py \
+    --planner llamafactory \
+    --llamafactory-model Qwen2.5-7B \
+    --llamafactory-adapter Qwen/LLaMA-Factory/saves/Qwen2.5-7B/lora/train_xxx \
     --city-map-path dataset/example.png \
     --user-request-path ReAct/requests/task1.txt
 
 参数说明:
-  load_qwen_bundle(model_path, device, dtype): 加载并缓存本地 Qwen 模型。
-  call_qwen_chat(model_path, messages, device, dtype, max_new_tokens, do_sample, temperature, top_p, top_k): 执行一次本地 chat 推理。
+  load_qwen_bundle(model_path, device, dtype, adapter_path): 加载并缓存本地 Qwen 模型，可选合并 LoRA adapter。
+  call_qwen_chat(model_path, messages, device, dtype, max_new_tokens, do_sample, temperature, top_p, top_k, adapter_path): 执行一次本地 chat 推理。
 
 逻辑说明:
   这个模块只负责本地模型推理，不参与动作解析、候选修复或环境交互。上层把标准 chat messages 传进来，
@@ -24,7 +31,36 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 
-_QWEN_CACHE: Dict[Tuple[str, str, str], Tuple[object, object, str]] = {}
+_QWEN_CACHE: Dict[Tuple[str, str, str, str], Tuple[object, object, str]] = {}
+
+
+def clear_qwen_cache() -> None:
+    cached_values = list(_QWEN_CACHE.values())
+    _QWEN_CACHE.clear()
+    for entry in cached_values:
+        try:
+            _, model, _ = entry
+        except Exception:
+            continue
+        try:
+            del model
+        except Exception:
+            pass
+
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def _resolve_device(device: str) -> str:
@@ -54,27 +90,64 @@ def _resolve_dtype(dtype: str):
     return mapping[dtype]
 
 
-def load_qwen_bundle(model_path: str, device: str = "mps", dtype: str = "auto"):
-    resolved_path = str(Path(model_path).expanduser().resolve())
+def load_qwen_bundle(model_path: str, device: str = "mps", dtype: str = "auto", adapter_path: str = ""):
+    resolved_dir = Path(model_path).expanduser().resolve()
+    if not resolved_dir.exists():
+        raise FileNotFoundError(f"Qwen model path does not exist: {resolved_dir}")
+    if not resolved_dir.is_dir():
+        raise NotADirectoryError(f"Qwen model path is not a directory: {resolved_dir}")
+    required_files = ("config.json", "tokenizer_config.json")
+    missing = [name for name in required_files if not (resolved_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Qwen model directory is incomplete: {resolved_dir}. Missing files: {', '.join(missing)}"
+        )
+
+    resolved_adapter = ""
+    if adapter_path:
+        adapter_dir = Path(adapter_path).expanduser().resolve()
+        if not adapter_dir.exists():
+            raise FileNotFoundError(f"Qwen adapter path does not exist: {adapter_dir}")
+        if not adapter_dir.is_dir():
+            raise NotADirectoryError(f"Qwen adapter path is not a directory: {adapter_dir}")
+        adapter_required = ("adapter_config.json",)
+        adapter_missing = [name for name in adapter_required if not (adapter_dir / name).exists()]
+        if adapter_missing:
+            raise FileNotFoundError(
+                f"Qwen adapter directory is incomplete: {adapter_dir}. Missing files: {', '.join(adapter_missing)}"
+            )
+        resolved_adapter = str(adapter_dir)
+
+    resolved_path = str(resolved_dir)
     resolved_device = _resolve_device(device)
-    cache_key = (resolved_path, resolved_device, dtype)
+    cache_key = (resolved_path, resolved_device, dtype, resolved_adapter)
     cached = _QWEN_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     try:
         import torch
+        from peft import PeftModel
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError as exc:
-        raise ImportError("Qwen planner requires transformers and torch in the current environment.") from exc
+        raise ImportError("Qwen planner requires transformers, peft and torch in the current environment.") from exc
 
     model_kwargs = {
         "trust_remote_code": True,
-        "torch_dtype": _resolve_dtype(dtype),
+        "dtype": _resolve_dtype(dtype),
+        "low_cpu_mem_usage": True,
     }
+    if resolved_device == "cuda":
+        model_kwargs["device_map"] = {"": 0}
     tokenizer = AutoTokenizer.from_pretrained(resolved_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(resolved_path, **model_kwargs)
-    model.to(torch.device(resolved_device))
+    if resolved_adapter:
+        peft_kwargs = {}
+        if resolved_device == "cuda":
+            peft_kwargs["device_map"] = {"": 0}
+        model = PeftModel.from_pretrained(model, resolved_adapter, **peft_kwargs)
+    if resolved_device != "cuda":
+        model.to(torch.device(resolved_device))
     model.eval()
 
     bundle = (tokenizer, model, resolved_device)
@@ -92,8 +165,14 @@ def call_qwen_chat(
     temperature: float = 0.0,
     top_p: float = 1.0,
     top_k: int = 1,
+    adapter_path: str = "",
 ) -> str:
-    tokenizer, model, resolved_device = load_qwen_bundle(model_path=model_path, device=device, dtype=dtype)
+    tokenizer, model, resolved_device = load_qwen_bundle(
+        model_path=model_path,
+        device=device,
+        dtype=dtype,
+        adapter_path=adapter_path,
+    )
 
     prompt = tokenizer.apply_chat_template(
         messages,
@@ -107,13 +186,13 @@ def call_qwen_chat(
     generation_kwargs = {
         "max_new_tokens": int(max_new_tokens),
         "do_sample": bool(do_sample),
-        "top_p": float(top_p),
-        "top_k": int(top_k),
         "pad_token_id": tokenizer.eos_token_id,
         "eos_token_id": tokenizer.eos_token_id,
     }
     if do_sample:
         generation_kwargs["temperature"] = max(float(temperature), 1e-6)
+        generation_kwargs["top_p"] = float(top_p)
+        generation_kwargs["top_k"] = int(top_k)
 
     outputs = model.generate(**encoded, **generation_kwargs)
     input_length = int(encoded["input_ids"].shape[-1])

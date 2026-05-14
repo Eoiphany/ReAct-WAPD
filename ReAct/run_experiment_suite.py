@@ -48,8 +48,12 @@ python autodl-tmp/code/ReAct/run_experiment_suite.py \
 - --planner: 单任务决策器，支持 heuristic/random/openai/qwen/llamafactory 等。
 - --prompt-path / --prompt-key: 透传给单任务脚本的 prompt 配置。
 - --max-steps / --auto-steps: 单任务最大步数，或按需求文本自动推断步数。
-- --candidate-sample / --llm-top-k-candidates / --llm-decision-mode: 单任务候选点采样和 LLM 决策模式配置。
+- --candidate-sample / --llm-top-k-candidates / --llm-decision-mode: 单任务候选点采样和 LLM 决策模式配置；默认分别为 16 和 8。
+- --heuristic-online-candidate-sample: online heuristic / heuristic_greedy 每一步真实评分使用的候选点数量，默认 128。
+- --heuristic-search-budget: 启发式方法每张图允许使用的代理模型真实评估总预算；用于统一不同启发式方法的搜索开销口径。
+- --use-heuristic-cache: clustered heuristic / exhaustive 是否允许直接复用 `outputs/heuristic_cache` 中已有目标布局。
 - --eval-model / --eval-device / --init-mode / --init-k / --seed / --print-step / --print-llm / --print-timing / --llm-dump-path: 单任务评估模型、评估设备、初始化策略、日志与随机种子等配置；默认评估模型为 rmnet。
+- --eval-model-path: 可选，显式指定单任务评估模型权重路径。
 - --openai-*: planner=openai 时透传的接口参数。
 - --qwen-*: planner=qwen 时透传的本地 Qwen 参数。
 - --llamafactory-*: planner=llamafactory 时透传的 base model、adapter、template、backend、dtype。
@@ -125,12 +129,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-key", default="react_radiomap_decide")
     parser.add_argument("--max-steps", type=int, default=5)
     parser.add_argument("--auto-steps", action="store_true")
-    parser.add_argument("--candidate-sample", type=int, default=64)
-    parser.add_argument("--llm-top-k-candidates", type=int, default=16)
+    parser.add_argument("--candidate-sample", type=int, default=16)
+    parser.add_argument("--heuristic-online-candidate-sample", type=int, default=128)
+    parser.add_argument("--llm-top-k-candidates", type=int, default=8)
     parser.add_argument("--llm-decision-mode", choices=["decide", "explain_weighted"], default="decide")
+    parser.add_argument("--heuristic-search-budget", type=int, default=100)
+    parser.add_argument("--heuristic-candidate-stride", type=int, default=12)
+    parser.add_argument("--heuristic-candidate-limit", type=int, default=256)
+    parser.add_argument("--use-heuristic-cache", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--eval-model", choices=["pmnet", "rmnet", "proxy"], default="rmnet")
+    parser.add_argument("--eval-model-path", default="")
     parser.add_argument("--eval-device", choices=["auto", "cpu", "cuda", "mps"], default="mps")
-    parser.add_argument("--init-mode", choices=["none", "random", "greedy", "two_stage"], default="none")
+    parser.add_argument(
+        "--init-mode",
+        choices=["none", "random", "greedy", "heuristic_sa", "heuristic_ga", "heuristic_pso", "two_stage"],
+        default="none",
+    )
     parser.add_argument("--init-k", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--print-llm", action="store_true")
@@ -151,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llamafactory-template", default="qwen")
     parser.add_argument("--llamafactory-backend", default="huggingface")
     parser.add_argument("--llamafactory-dtype", default="auto")
-    parser.add_argument("--two-stage-module-state", default=str((ROOT_DIR / "../Autobs/bandit_policy/best_module_state.pt").resolve()))
+    parser.add_argument("--two-stage-module-state", default=str((ROOT_DIR / "../Autobs/outputs/rerank/best_module_state.pt").resolve()))
     parser.add_argument("--two-stage-version", choices=["auto", "single", "multi"], default="auto")
     parser.add_argument("--two-stage-init-k", type=int, default=1)
     return parser
@@ -175,7 +189,20 @@ def resolve_suite_name(args: argparse.Namespace) -> str:
 def resolve_map_paths(args: argparse.Namespace) -> List[str]:
     if args.maps_list:
         maps_list_path = Path(args.maps_list)
-        maps = [line.strip() for line in maps_list_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        raw_maps = [line.strip() for line in maps_list_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        maps = []
+        fallback_root = Path(args.maps_dir).resolve() if args.maps_dir else None
+        for raw_path in raw_maps:
+            candidate = Path(raw_path)
+            if candidate.exists():
+                maps.append(str(candidate.resolve()))
+                continue
+            if fallback_root is not None:
+                remapped = fallback_root / candidate.name
+                if remapped.exists():
+                    maps.append(str(remapped.resolve()))
+                    continue
+            raise FileNotFoundError(f"Map path from maps_list not found: {candidate}")
     elif args.maps_dir:
         maps = resolve_city_map_paths(args.maps_dir, default_path=args.maps_dir)
     else:
@@ -241,12 +268,22 @@ def build_task_command(
         str(args.max_steps),
         "--candidate-sample",
         str(args.candidate_sample),
+        "--heuristic-online-candidate-sample",
+        str(getattr(args, "heuristic_online_candidate_sample", 128)),
         "--llm-top-k-candidates",
         str(args.llm_top_k_candidates),
         "--llm-decision-mode",
         args.llm_decision_mode,
+        "--heuristic-search-budget",
+        str(args.heuristic_search_budget),
+        "--heuristic-candidate-stride",
+        str(getattr(args, "heuristic_candidate_stride", 12)),
+        "--heuristic-candidate-limit",
+        str(getattr(args, "heuristic_candidate_limit", 256)),
         "--eval-model",
         args.eval_model,
+        "--eval-model-path",
+        args.eval_model_path,
         "--eval-device",
         args.eval_device,
         "--init-mode",
@@ -449,6 +486,16 @@ def run_suite(args: argparse.Namespace) -> Dict[str, Any]:
             tone="accent",
         )
     )
+    print(
+        status_line(
+            "INFO",
+            (
+                f"planner={args.planner} init_mode={args.init_mode} "
+                f"llm_mode={args.llm_decision_mode} eval_model={args.eval_model} eval_device={args.eval_device}"
+            ),
+            tone="accent",
+        )
+    )
 
     python_bin = sys.executable
     suite_start = time.perf_counter()
@@ -469,6 +516,16 @@ def run_suite(args: argparse.Namespace) -> Dict[str, Any]:
     )
     for task_idx, task in enumerate(tasks, 1):
         print(status_line("TASK", f"{task_idx}/{len(tasks)} {_task_name(task)}", tone="progress"))
+        print(
+            status_line(
+                "INFO",
+                (
+                    f"dispatch planner={args.planner} init_mode={args.init_mode} "
+                    f"request={Path(task['user_request_path']).stem}"
+                ),
+                tone="info",
+            )
+        )
         task_start = time.perf_counter()
         append_jsonl(
             run_events_path,
@@ -549,7 +606,14 @@ def run_suite(args: argparse.Namespace) -> Dict[str, Any]:
     summary["tasks_count"] = len(tasks)
     summary["planner"] = args.planner
     summary["perf"] = summarize_run_records(run_records)
-    summary["perf"]["suite_runtime_sec"] = time.perf_counter() - suite_start
+    suite_runtime_wall_sec = time.perf_counter() - suite_start
+    summary["perf"]["suite_runtime_wall_sec"] = float(suite_runtime_wall_sec)
+    summary["perf"]["suite_runtime_sec"] = float(
+        max(
+            suite_runtime_wall_sec,
+            float(summary["perf"].get("runtime_total_sec", 0.0) or 0.0),
+        )
+    )
 
     write_csv(
         suite_dir / "run_records.csv",

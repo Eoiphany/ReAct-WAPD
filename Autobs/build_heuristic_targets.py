@@ -34,7 +34,7 @@ from Autobs.compare_initialization_methods import (
     normalize_method_name,
     run_heuristic_method,
 )
-from Autobs.env.utils import resolve_city_map_paths
+from Autobs.utils import resolve_city_map_paths
 from Autobs.paths import DEFAULT_DATASET_MAP_DIR, PACKAGE_ROOT
 
 

@@ -1,9 +1,9 @@
 """注释
 命令:
-- `Python -m Autobs.train_ppo`
+- `Python -m Autobs.pretrain_policy`
 
 参数含义:
-- 当前 PPO 训练主流程默认仍走 PMNet。
+- 当前策略学习主流程默认仍可通过适配层切换模型。
 - 本文件把旧 RMNet 代码一起迁入 `Autobs/models`，便于保持代理模型代码齐全并支持后续替换实验。
 """
 
