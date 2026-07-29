@@ -535,7 +535,10 @@ def resolve_surrogate_samples_payload(payload: dict[str, Any]) -> dict[str, Any]
         sample_names = _pick_random_surrogate_samples(resolved_sample_names, limit=10) if csv_file else resolved_sample_names
     selected_sample = str(payload.get("selectedSample") or "").strip()
     if selected_sample and selected_sample not in sample_names:
-        selected_sample = ""
+        if selected_sample in resolved_sample_names:
+            sample_names = [*sample_names, selected_sample]
+        else:
+            selected_sample = ""
     if not selected_sample and sample_names:
         selected_sample = sample_names[0]
     if csv_file and checkpoint_run_dir and Path(csv_file).parent == Path(checkpoint_run_dir).resolve():
@@ -850,6 +853,9 @@ class SurrogateRuntimeManager:
                 **self.payload,
                 "runtimeDir": str(self.runtime_dir),
                 "checkpoints": self.checkpoints,
+                "sampleNames": self.sample_names,
+                "sampleItems": self.sample_items,
+                "sampleSource": self.sample_source,
                 "selectedSample": self.selected_sample,
             }
             payload_path = self.runtime_dir / "payload.json"

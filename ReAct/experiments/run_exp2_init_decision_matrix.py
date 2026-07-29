@@ -2,8 +2,8 @@
 命令示例:
 python -m ReAct.experiments.run_exp2_init_decision_matrix
 python -m ReAct.experiments.run_exp2_init_decision_matrix --group heuristic --num-maps 1
-python -m ReAct.experiments.run_exp2_init_decision_matrix --group llm --eval-device cuda --num-maps 1
-python -m ReAct.experiments.run_exp2_init_decision_matrix --num-maps 20 --eval-device cuda
+python -m ReAct.experiments.run_exp2_init_decision_matrix --group llm --num-maps 1 --candidate-sample 32 --llm-top-k-candidates 16
+python -m ReAct.experiments.run_exp2_init_decision_matrix --num-maps 20 --candidate-sample 32 --llm-top-k-candidates 16
 
 参数说明:
 - --maps-dir: 实验 2 使用的地图目录。
@@ -12,13 +12,16 @@ python -m ReAct.experiments.run_exp2_init_decision_matrix --num-maps 20 --eval-d
 - --heuristic-search-budget: Exhaustive 重新运行时使用的搜索预算；其余启发式默认走 exp1 cache。
 - --use-heuristic-cache: 是否允许 exp2 直接复用既有 heuristic cache；启用时 Exhaustive 仍会被脚本内强制 fresh run。
 - --group: `heuristic` 只跑启发式+穷举，`llm` 只跑调用 LLM 的组合，`all` 全部执行。
-- --eval-device: 服务器或本地推理设备。
+- --candidate-sample: 每步从合法动作中抽取并由代理模型评分的候选数量，默认 32。
+- --llm-top-k-candidates: 评分后提供给 LLM 的高分候选数量，默认 16。
+- --eval-device: 代理模型、模型初始化、Qwen 与 LLaMA-Factory 的推理设备，默认 CUDA。
 
 逻辑说明:
 该脚本按第二张图的矩阵组织实验：上半部分是“初始化方法与决策方法相同”的纯启发式/穷举组，
 下半部分是不同初始化方法与 LLM 决策方法的组合组。
 其中 exp2 的启发式组会先使用对应方法完成一次初始化，再由同名启发式继续决策；
 `Exhaustive` 也会先执行一次穷举初始化，再进入穷举决策阶段。
+实验目录与汇总文件名包含 `cs<候选数>_topk<保留数>` 后缀，避免不同候选配置相互覆盖。
 """
 
 from __future__ import annotations
@@ -57,9 +60,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--planner", choices=planner_choices, default="all")
     parser.add_argument("--llm-mode", choices=["all", "decide", "explain_weighted"], default="all")
     parser.add_argument("--init-mode", choices=init_choices, default="all")
-    parser.add_argument("--eval-device", choices=["auto", "cpu", "cuda", "mps"], default="mps")
+    parser.add_argument("--candidate-sample", type=int, default=32)
+    parser.add_argument("--llm-top-k-candidates", type=int, default=16)
+    parser.add_argument("--eval-device", choices=["auto", "cpu", "cuda", "mps"], default="cuda")
     parser.add_argument("--output-root", default=str(DEFAULT_EXPERIMENT_OUTPUT_ROOT / "exp2_init_decision_matrix"))
     return parser
+
+
+def candidate_config_suffix(candidate_sample: int, llm_top_k_candidates: int) -> str:
+    return f"cs{int(candidate_sample)}_topk{int(llm_top_k_candidates)}"
+
+
+def experiment_suite_name(prefix: str, candidate_sample: int, llm_top_k_candidates: int) -> str:
+    return f"{prefix}_{candidate_config_suffix(candidate_sample, llm_top_k_candidates)}"
+
+
+def summary_output_stem(group: str, candidate_sample: int, llm_top_k_candidates: int) -> str:
+    prefix = "exp2_init_decision_matrix" if group == "all" else f"exp2_init_decision_matrix_{group}"
+    return experiment_suite_name(prefix, candidate_sample, llm_top_k_candidates)
 
 
 def main() -> None:
@@ -92,11 +110,15 @@ def main() -> None:
                 num_maps=args.num_maps,
                 request_file=request_path,
                 output_root=output_root / "runs" / "heuristic",
-                suite_name=f"same_{planner}",
+                suite_name=experiment_suite_name(
+                    f"same_{planner}", args.candidate_sample, args.llm_top_k_candidates
+                ),
                 planner=planner,
                 eval_device=args.eval_device,
                 init_mode=heuristic_init_mode,
                 llm_decision_mode="decide",
+                candidate_sample=args.candidate_sample,
+                llm_top_k_candidates=args.llm_top_k_candidates,
                 heuristic_search_budget=args.heuristic_search_budget,
                 use_heuristic_cache=use_heuristic_cache,
                 replay_traj_dir=replay_traj_dir,
@@ -138,15 +160,19 @@ def main() -> None:
                     num_maps=args.num_maps,
                     request_file=request_path,
                     output_root=output_root / "runs" / "llm",
-                    suite_name=f"{init_mode}_{planner}_{llm_mode}",
+                    suite_name=experiment_suite_name(
+                        f"{init_mode}_{planner}_{llm_mode}",
+                        args.candidate_sample,
+                        args.llm_top_k_candidates,
+                    ),
                     planner=planner,
                     eval_device=args.eval_device,
                     init_mode=init_mode,
                     init_k=1,
                     two_stage_init_k=1,
                     llm_decision_mode=llm_mode,
-                    candidate_sample=16,
-                    llm_top_k_candidates=8,
+                    candidate_sample=args.candidate_sample,
+                    llm_top_k_candidates=args.llm_top_k_candidates,
                 )
                 summary = run_named_suite(suite_args)
                 row = {
@@ -156,7 +182,7 @@ def main() -> None:
                 row.update(summary_to_metric_row(summary))
                 rows.append(row)
 
-    stem = "exp2_init_decision_matrix" if args.group == "all" else f"exp2_init_decision_matrix_{args.group}"
+    stem = summary_output_stem(args.group, args.candidate_sample, args.llm_top_k_candidates)
     title = "Experiment 2 Init Decision Matrix" if args.group == "all" else f"Experiment 2 Init Decision Matrix ({args.group})"
 
     write_table_outputs(

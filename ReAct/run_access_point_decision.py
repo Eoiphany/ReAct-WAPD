@@ -483,9 +483,17 @@ def _wait_for_visualization_ack(sync_dir: str, observation_index: int, timeout_s
         time.sleep(0.05)
 
 
+def resolve_visualization_sync_settings(args: argparse.Namespace) -> tuple[str, float]:
+    return (
+        str(getattr(args, "visualization_sync_dir", "")),
+        float(getattr(args, "visualization_sync_timeout_sec", 0.0)),
+    )
+
+
 def run_task(args: argparse.Namespace) -> Dict[str, Any]:
     args.eval_device = _resolve_runtime_device(str(args.eval_device))
     args.qwen_device = _resolve_runtime_device(str(args.qwen_device))
+    visualization_sync_dir, visualization_sync_timeout_sec = resolve_visualization_sync_settings(args)
     heuristic_search_budget = max(1, int(args.heuristic_search_budget))
     task_setup_start = time.perf_counter()
     if args.llm_decision_mode == "explain_weighted" and args.prompt_key == "react_radiomap_decide":
@@ -681,9 +689,9 @@ def run_task(args: argparse.Namespace) -> Dict[str, Any]:
     env.env.traj["step_logs"] = list(step_logs)
     env.env.write_snapshot()
     _wait_for_visualization_ack(
-        str(args.visualization_sync_dir),
+        visualization_sync_dir,
         observation_index=0,
-        timeout_sec=float(args.visualization_sync_timeout_sec),
+        timeout_sec=visualization_sync_timeout_sec,
     )
 
     for step_idx in range(args.max_steps):
@@ -1117,9 +1125,9 @@ def run_task(args: argparse.Namespace) -> Dict[str, Any]:
         env.env.traj["step_logs"] = list(step_logs)
         env.env.write_snapshot()
         _wait_for_visualization_ack(
-            str(args.visualization_sync_dir),
+            visualization_sync_dir,
             observation_index=step_idx + 1,
-            timeout_sec=float(args.visualization_sync_timeout_sec),
+            timeout_sec=visualization_sync_timeout_sec,
         )
 
         should_print_step = args.print_step

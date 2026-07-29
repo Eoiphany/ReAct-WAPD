@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="2050" viewBox="0 0 2400 2050">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5563"/>
+</marker>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#111827}
+.title{font-size:22px;font-weight:700}
+.node{fill:#ffffff;stroke:#334155;stroke-width:2}
+.line{fill:none;stroke:#4b5563;stroke-width:2.2;marker-end:url(#arrow)}
+.label{font-size:15px;fill:#374151}
+.nodeText{font-size:16px;font-weight:500;text-anchor:middle;dominant-baseline:middle}
+</style>
+</defs>
+<rect x="0" y="0" width="2400" height="2050" fill="#f8fafc"/>
+<text x="1200" y="28" class="title" text-anchor="middle">统一Web可视化系统操作流程图</text>
+<path class="node" d="M 1040.0 40 H 1160.0 A 30.0 30.0 0 0 1 1160.0 100 H 1040.0 A 30.0 30.0 0 0 1 1040.0 40 Z"/>
+<text class="nodeText" x="1100" y="70">开始</text>
+<path class="node" d="M 980 140 H 1220 V 210 H 980 Z"/>
+<text class="nodeText" x="1100" y="175">启动HTTP服务</text>
+<path class="node" d="M 920 250 H 1280 V 320 H 920 Z"/>
+<text class="nodeText" x="1100" y="285">进入统一Web可视化界面</text>
+<path class="node" d="M 1100 360 L 1190 405 L 1100 450 L 1010 405 Z"/>
+<text class="nodeText" x="1100" y="405">选择页面</text>
+<path class="node" d="M 250 360 H 510 V 430 H 250 Z"/>
+<text class="nodeText" x="380" y="395">进入部署可视化页面</text>
+<path class="node" d="M 250 470 H 510 V 540 H 250 Z"/>
+<text class="nodeText" x="380" y="505">选择地图与需求文件</text>
+<path class="node" d="M 250 570 H 510 V 640 H 250 Z"/>
+<text class="nodeText" x="380" y="605">执行需求结构化预览</text>
+<path class="node" d="M 180 670 H 580 V 740 H 180 Z"/>
+<text class="nodeText" x="380" y="705">配置规划器、代理模型与搜索参数</text>
+<path class="node" d="M 250 770 H 510 V 840 H 250 Z"/>
+<text class="nodeText" x="380" y="805">启动闭环部署任务</text>
+<path class="node" d="M 180 870 H 580 V 940 H 180 Z"/>
+<text class="nodeText" x="380" y="905">后端构建命令并启动决策进程</text>
+<path class="node" d="M 170 970 H 590 V 1040 H 170 Z"/>
+<text class="nodeText" x="380" y="1005">决策进程持续写入trajectory.json</text>
+<path class="node" d="M 180 1070 H 580 V 1140 H 180 Z"/>
+<text class="nodeText" x="380" y="1105">后端轮询轨迹并解析当前状态</text>
+<path class="node" d="M 120 1170 H 640 V 1240 H 120 Z"/>
+<text class="nodeText" x="380" y="1205">渲染RoI覆盖率图、部署效果图与指标趋势图</text>
+<path class="node" d="M 250 1270 H 510 V 1340 H 250 Z"/>
+<text class="nodeText" x="380" y="1305">SSE推送状态到前端</text>
+<path class="node" d="M 180 1370 H 580 V 1440 H 180 Z"/>
+<text class="nodeText" x="380" y="1405">前端刷新流程状态、图像、表格与日志</text>
+<path class="node" d="M 380 1470 L 510 1515 L 380 1560 L 250 1515 Z"/>
+<text class="nodeText" x="380" y="1515">任务是否结束</text>
+<path class="node" d="M 250 1600 H 510 V 1670 H 250 Z"/>
+<text class="nodeText" x="380" y="1635">展示最终部署结果</text>
+<path class="node" d="M 380 1700 L 510 1745 L 380 1790 L 250 1745 Z"/>
+<text class="nodeText" x="380" y="1745">继续操作</text>
+<path class="node" d="M 1500 360 H 1800 V 430 H 1500 Z"/>
+<text class="nodeText" x="1650" y="395">进入代理模型可视化页面</text>
+<path class="node" d="M 1650 470 L 1740 515 L 1650 560 L 1560 515 Z"/>
+<text class="nodeText" x="1650" y="515">选择模式</text>
+<path class="node" d="M 1400.0 600 H 1580.0 A 30.0 30.0 0 0 1 1580.0 660 H 1400.0 A 30.0 30.0 0 0 1 1400.0 600 Z"/>
+<text class="nodeText" x="1490" y="630">预训练模式</text>
+<path class="node" d="M 1270 700 H 1710 V 770 H 1270 Z"/>
+<text class="nodeText" x="1490" y="735">配置数据集、模型与训练超参数</text>
+<path class="node" d="M 1370 800 H 1610 V 870 H 1370 Z"/>
+<text class="nodeText" x="1490" y="835">启动代理模型训练任务</text>
+<path class="node" d="M 1370 900 H 1610 V 970 H 1370 Z"/>
+<text class="nodeText" x="1490" y="935">后端启动训练进程</text>
+<path class="node" d="M 1250 1000 H 1730 V 1070 H 1250 Z"/>
+<text class="nodeText" x="1490" y="1035">训练过程写入history.json等结果文件</text>
+<path class="node" d="M 1240 1100 H 1740 V 1170 H 1240 Z"/>
+<text class="nodeText" x="1490" y="1135">后端检测训练指标变化并生成训练曲线</text>
+<path class="node" d="M 1290 1200 H 1690 V 1270 H 1290 Z"/>
+<text class="nodeText" x="1490" y="1235">SSE推送训练状态与可视化结果</text>
+<path class="node" d="M 1300 1300 H 1680 V 1370 H 1300 Z"/>
+<text class="nodeText" x="1490" y="1335">前端刷新日志、摘要与训练指标图</text>
+<path class="node" d="M 1490 1400 L 1610 1445 L 1490 1490 L 1370 1445 Z"/>
+<text class="nodeText" x="1490" y="1445">任务是否结束</text>
+<path class="node" d="M 1330 1530 H 1650 V 1600 H 1330 Z"/>
+<text class="nodeText" x="1490" y="1565">展示训练结果与运行摘要</text>
+<path class="node" d="M 1490 1630 L 1610 1675 L 1490 1720 L 1370 1675 Z"/>
+<text class="nodeText" x="1490" y="1675">继续操作</text>
+<path class="node" d="M 1880.0 600 H 2080.0 A 30.0 30.0 0 0 1 2080.0 660 H 1880.0 A 30.0 30.0 0 0 1 1880.0 600 Z"/>
+<text class="nodeText" x="1980" y="630">Checkpoint评测模式</text>
+<path class="node" d="M 1840 700 H 2120 V 770 H 1840 Z"/>
+<text class="nodeText" x="1980" y="724">填写Checkpoint输出目</text>
+<text class="nodeText" x="1980" y="746">录</text>
+<path class="node" d="M 1840 800 H 2120 V 870 H 1840 Z"/>
+<text class="nodeText" x="1980" y="835">检测测试集并绑定样本</text>
+<path class="node" d="M 1840 900 H 2120 V 970 H 1840 Z"/>
+<text class="nodeText" x="1980" y="935">选择测试样本</text>
+<path class="node" d="M 1810 1000 H 2150 V 1070 H 1810 Z"/>
+<text class="nodeText" x="1980" y="1035">添加一个或多个Checkpoint</text>
+<path class="node" d="M 1840 1100 H 2120 V 1170 H 1840 Z"/>
+<text class="nodeText" x="1980" y="1135">启动单样本多模型评测</text>
+<path class="node" d="M 1820 1200 H 2140 V 1270 H 1820 Z"/>
+<text class="nodeText" x="1980" y="1235">后端执行多Checkpoint预测</text>
+<path class="node" d="M 1760 1300 H 2200 V 1370 H 1760 Z"/>
+<text class="nodeText" x="1980" y="1335">生成预测对比图及RMSE、MAE、R2指标</text>
+<path class="node" d="M 1840 1400 H 2120 V 1470 H 1840 Z"/>
+<text class="nodeText" x="1980" y="1435">SSE推送评测状态与结果</text>
+<path class="node" d="M 1770 1500 H 2190 V 1570 H 1770 Z"/>
+<text class="nodeText" x="1980" y="1535">前端刷新对比图、指标表与模型列表</text>
+<path class="node" d="M 1980 1600 L 2120 1645 L 1980 1690 L 1840 1645 Z"/>
+<text class="nodeText" x="1980" y="1645">任务是否结束</text>
+<path class="node" d="M 1780 1730 H 2180 V 1800 H 1780 Z"/>
+<text class="nodeText" x="1980" y="1765">展示评测结果与模型对比结论</text>
+<path class="node" d="M 1980 1830 L 2120 1875 L 1980 1920 L 1840 1875 Z"/>
+<text class="nodeText" x="1980" y="1875">继续操作</text>
+<path class="node" d="M 1040.0 1945 H 1160.0 A 30.0 30.0 0 0 1 1160.0 2005 H 1040.0 A 30.0 30.0 0 0 1 1040.0 1945 Z"/>
+<text class="nodeText" x="1100" y="1975">结束</text>
+<polyline class="line" points="1100,100 1100,140"/>
+<polyline class="line" points="1100,210 1100,250"/>
+<polyline class="line" points="1100,320 1100,360"/>
+<polyline class="line" points="1010,405 920,405 510,405"/>
+<polyline class="line" points="1190,405 1280,405 1500,405"/>
+<polyline class="line" points="380,430 380,470"/>
+<polyline class="line" points="380,540 380,570"/>
+<polyline class="line" points="380,640 380,670"/>
+<polyline class="line" points="380,740 380,770"/>
+<polyline class="line" points="380,840 380,870"/>
+<polyline class="line" points="380,940 380,970"/>
+<polyline class="line" points="380,1040 380,1070"/>
+<polyline class="line" points="380,1140 380,1170"/>
+<polyline class="line" points="380,1240 380,1270"/>
+<polyline class="line" points="380,1340 380,1370"/>
+<polyline class="line" points="380,1440 380,1470"/>
+<polyline class="line" points="380,1560 380,1600"/>
+<polyline class="line" points="380,1670 380,1700"/>
+<polyline class="line" points="380,1790 380,1840 380,1975 1010,1975"/>
+<polyline class="line" points="1650,430 1650,470"/>
+<polyline class="line" points="1560,515 1370,515"/>
+<polyline class="line" points="1740,515 1850,515"/>
+<polyline class="line" points="1490,660 1490,700"/>
+<polyline class="line" points="1490,770 1490,800"/>
+<polyline class="line" points="1490,870 1490,900"/>
+<polyline class="line" points="1490,970 1490,1000"/>
+<polyline class="line" points="1490,1070 1490,1100"/>
+<polyline class="line" points="1490,1170 1490,1200"/>
+<polyline class="line" points="1490,1270 1490,1300"/>
+<polyline class="line" points="1490,1370 1490,1400"/>
+<polyline class="line" points="1490,1490 1490,1530"/>
+<polyline class="line" points="1490,1600 1490,1630"/>
+<polyline class="line" points="1490,1720 1490,1830 1490,1975 1190,1975"/>
+<polyline class="line" points="1980,660 1980,700"/>
+<polyline class="line" points="1980,770 1980,800"/>
+<polyline class="line" points="1980,870 1980,900"/>
+<polyline class="line" points="1980,970 1980,1000"/>
+<polyline class="line" points="1980,1070 1980,1100"/>
+<polyline class="line" points="1980,1170 1980,1200"/>
+<polyline class="line" points="1980,1270 1980,1300"/>
+<polyline class="line" points="1980,1370 1980,1400"/>
+<polyline class="line" points="1980,1470 1980,1500"/>
+<polyline class="line" points="1980,1570 1980,1600"/>
+<polyline class="line" points="1980,1690 1980,1730"/>
+<polyline class="line" points="1980,1800 1980,1830"/>
+<polyline class="line" points="1980,1920 1980,1975 1190,1975"/>
+<polyline class="line" points="250,1515 90,1515 90,405 1010,405"/>
+<polyline class="line" points="1370,1445 1180,1445 1180,1035 1250,1035"/>
+<polyline class="line" points="1840,1645 1700,1645 1700,1235 1820,1235"/>
+<polyline class="line" points="250,1745 90,1745 90,285 920,285"/>
+<polyline class="line" points="510,1745 760,1745 760,405 1010,405"/>
+<polyline class="line" points="1370,1675 1180,1675 1180,630 1370,630"/>
+<polyline class="line" points="1610,1675 1740,1675 1740,630 1850,630"/>
+<polyline class="line" points="1490,1630 1490,590 1100,590 1100,320"/>
+<polyline class="line" points="1840,1875 1650,1875 1650,630 1610,630"/>
+<polyline class="line" points="2120,1875 2270,1875 2270,405 1190,405"/>
+<polyline class="line" points="1980,1830 1980,590 1100,590 1100,320"/>
+<text class="label" x="930" y="392">部署</text>
+<text class="label" x="1325" y="392">代理模型</text>
+<text class="label" x="60" y="950">否</text>
+<text class="label" x="1120" y="1240">否</text>
+<text class="label" x="1670" y="1440">否</text>
+<text class="label" x="150" y="1030">重置</text>
+<text class="label" x="790" y="980">切换页面</text>
+<text class="label" x="1760" y="980">切换到评测模式</text>
+<text class="label" x="1600" y="1230">切换到预训练模式</text>
+<text class="label" x="2210" y="980">切换页面</text>
+</svg>

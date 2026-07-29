@@ -223,6 +223,12 @@ def main() -> None:
         sample_names = resolved_sample_names
     if not sample_names:
         raise ValueError("No evaluation samples resolved.")
+    sample_name = str(payload.get("selectedSample") or "").strip() or sample_names[0]
+    if sample_name not in sample_names:
+        if sample_name in resolved_sample_names:
+            sample_names = [*sample_names, sample_name]
+        else:
+            raise ValueError(f"Selected sample not found: {sample_name}")
     sample_items = format_sample_items(dataset_key, sample_names, limit=max(len(sample_names), 12))
     checkpoint_run_dir = (payload.get("checkpointRunDir") or "").strip()
     if csv_file and checkpoint_run_dir and Path(csv_file).parent == Path(checkpoint_run_dir).resolve():
@@ -231,9 +237,6 @@ def main() -> None:
         sample_source = "来自显式指定的样本文件"
     else:
         sample_source = "来自当前数据集默认测试样本集合。"
-    sample_name = str(payload.get("selectedSample") or "").strip() or sample_names[0]
-    if sample_name not in sample_names:
-        raise ValueError(f"Selected sample not found: {sample_name}")
     write_json(
         runtime_dir / "manifest.json",
         {

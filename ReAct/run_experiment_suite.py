@@ -1,22 +1,23 @@
 """注释
 命令示例:
 1. 使用 LLaMA-Factory LoRA 权重批量评估测试集，并自动输出轨迹与 OK 率汇总:
-python autodl-tmp/code/ReAct/run_experiment_suite.py \
+python autodl-tmp/ReAct/run_experiment_suite.py \
   --planner llamafactory \
-  --maps-list autodl-tmp/code/ReAct/data/maps_test_paths.txt \
-  --requests-file autodl-tmp/code/ReAct/requests/coverage_capacity_budget_v2.txt \
-  --output-root autodl-tmp/code/ReAct/outputs/experiment_suites \
+  --maps-list autodl-tmp/ReAct/data/maps_test_paths.txt \
+  --request-file autodl-tmp/ReAct/requests/coverage_capacity_budget.txt \
+  --output-root autodl-tmp/ReAct/outputs/exp_32_16 \
   --suite-name llamafactory_eval_202604181404 \
-   --llamafactory-root autodl-tmp/LLaMA-Factory \
+  --llamafactory-root autodl-tmp/LLaMA-Factory \
   --llamafactory-model autodl-tmp/Qwen2.5-7B \
   --llamafactory-adapter autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/train_2026-02-14-14-09-21 \
   --llamafactory-template qwen \
   --llamafactory-backend huggingface \
   --llamafactory-dtype auto \
-  --eval-device mps \
+  --eval-device cuda \
+  --qwen-device cuda \
   --max-steps 5 \
   --auto-steps \
-  --candidate-sample 64 \
+  --candidate-sample 32 \
   --llm-top-k-candidates 16 \
   --llm-decision-mode explain_weighted \
   --print-step
@@ -52,10 +53,11 @@ python autodl-tmp/code/ReAct/run_experiment_suite.py \
 - --heuristic-online-candidate-sample: online heuristic / heuristic_greedy 每一步真实评分使用的候选点数量，默认 128。
 - --heuristic-search-budget: 启发式方法每张图允许使用的代理模型真实评估总预算；用于统一不同启发式方法的搜索开销口径。
 - --use-heuristic-cache: clustered heuristic / exhaustive 是否允许直接复用 `outputs/heuristic_cache` 中已有目标布局。
-- --eval-model / --eval-device / --init-mode / --init-k / --seed / --print-step / --print-llm / --print-timing / --llm-dump-path: 单任务评估模型、评估设备、初始化策略、日志与随机种子等配置；默认评估模型为 rmnet。
+- --eval-model / --eval-device / --init-mode / --init-k / --seed / --print-step / --print-llm / --print-timing / --llm-dump-path: 单任务评估模型、评估设备、初始化策略、日志与随机种子等配置；默认评估模型为 rmnet，PMNet/RMNet、模型驱动初始化及 LLaMA-Factory 推理默认使用 CUDA；NumPy proxy 不使用 GPU。
 - --eval-model-path: 可选，显式指定单任务评估模型权重路径。
+- --visualization-sync-dir / --visualization-sync-timeout-sec: 透传给单任务脚本的逐步可视化同步目录与等待超时；默认关闭同步等待。
 - --openai-*: planner=openai 时透传的接口参数。
-- --qwen-*: planner=qwen 时透传的本地 Qwen 参数。
+- --qwen-*: planner=qwen 时透传的本地 Qwen 参数；Qwen 推理默认使用 CUDA。
 - --llamafactory-*: planner=llamafactory 时透传的 base model、adapter、template、backend、dtype。
 - --two-stage-*: planner 需要二阶段策略学习初始化时透传的模块权重配置。
 
@@ -139,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-heuristic-cache", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--eval-model", choices=["pmnet", "rmnet", "proxy"], default="rmnet")
     parser.add_argument("--eval-model-path", default="")
-    parser.add_argument("--eval-device", choices=["auto", "cpu", "cuda", "mps"], default="mps")
+    parser.add_argument("--eval-device", choices=["auto", "cpu", "cuda", "mps"], default="cuda")
     parser.add_argument(
         "--init-mode",
         choices=["none", "random", "greedy", "heuristic_sa", "heuristic_ga", "heuristic_pso", "two_stage"],
@@ -151,12 +153,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--print-timing", action="store_true")
     parser.add_argument("--llm-dump-path", default="")
     parser.add_argument("--print-step", action="store_true")
+    parser.add_argument("--visualization-sync-dir", default="")
+    parser.add_argument("--visualization-sync-timeout-sec", type=float, default=0.0)
     parser.add_argument("--openai-api-key", default="")
     parser.add_argument("--openai-model", default="gpt-4o-mini")
     parser.add_argument("--openai-base-url", default="https://api.openai.com")
     parser.add_argument("--openai-response-format", choices=["none", "json_object"], default="none")
     parser.add_argument("--qwen-model-path", default=str((ROOT_DIR.parent / "Qwen" / "Qwen2.5-7B").resolve()))
-    parser.add_argument("--qwen-device", choices=["auto", "cpu", "cuda", "mps"], default="mps")
+    parser.add_argument("--qwen-device", choices=["auto", "cpu", "cuda", "mps"], default="cuda")
     parser.add_argument("--qwen-dtype", choices=["auto", "float16", "bfloat16", "float32"], default="auto")
     parser.add_argument("--qwen-max-new-tokens", type=int, default=320)
     parser.add_argument("--llamafactory-root", default="")

@@ -1198,7 +1198,7 @@
                 <div id="surrogate-compare-placeholder" class="compare-placeholder">当前还没有可视化图加载</div>
               </div>
             </div>
-            <div class="surrogate-card">
+            <div id="surrogate-metrics-card" class="surrogate-card" hidden>
               <strong>模型指标对比表</strong>
               <div class="table-scroll">
                 <table class="checkpoint-table">
@@ -1995,11 +1995,17 @@
       image.src = withCacheBust(buildUrl(url), state.surrogate.cacheToken);
     }
     function renderSurrogateMetricsTable() {
+      const card = byId("surrogate-metrics-card");
       const body = byId("surrogate-metrics-table-body");
-      if (!body) return;
+      if (!body || !card) return;
       const rows = (state.surrogate.metricsRows && state.surrogate.metricsRows.length)
         ? state.surrogate.metricsRows
-        : SURROGATE_REFERENCE_METRICS;
+        : [];
+      card.hidden = rows.length === 0;
+      if (!rows.length) {
+        body.innerHTML = "";
+        return;
+      }
       body.innerHTML = rows.map(item => `
         <tr>
           <td>${labelModelType(item.modelType)}</td>
